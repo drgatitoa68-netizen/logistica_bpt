@@ -43,6 +43,18 @@ export default function ConfiguracionPage() {
   const [showBulk, setShowBulk] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
+  // Nueva zona / localizadores
+  const [showNuevaZona, setShowNuevaZona] = useState(false);
+  const [nzZona, setNzZona]             = useState("");
+  const [nzDesde, setNzDesde]           = useState(1);
+  const [nzHasta, setNzHasta]           = useState(10);
+  const [nzFilas, setNzFilas]           = useState(1);
+  const [nzCols, setNzCols]             = useState(1);
+  const [nzCapacidad, setNzCapacidad]   = useState(20);
+  const [nzFormato, setNzFormato]       = useState("Mezcla");
+  const [nzPreview, setNzPreview]       = useState<string[]>([]);
+  const [savingZona, setSavingZona]     = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     const { data, error } = await db
@@ -100,6 +112,56 @@ export default function ConfiguracionPage() {
     } else {
       setSelected(new Set(filtered.map(key)));
     }
+  }
+
+  // ── Generate localizador codes for preview ───────────────────────────────
+  function generarLocalizadores(zona: string, desde: number, hasta: number, filas: number, cols: number): string[] {
+    const locs: string[] = [];
+    const z = zona.replace(/\s+/g, "").padStart(2, "0");
+    for (let n = desde; n <= hasta; n++) {
+      for (let f = 1; f <= filas; f++) {
+        for (let c = 1; c <= cols; c++) {
+          const loc = `${z}.${String(n).padStart(2,"0")}.${String(f).padStart(2,"0")}.${String(c).padStart(2,"0")}`;
+          locs.push(loc);
+        }
+      }
+    }
+    return locs;
+  }
+
+  function actualizarPreview() {
+    if (!nzZona.trim()) { setNzPreview([]); return; }
+    const locs = generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols);
+    setNzPreview(locs.slice(0, 30));
+  }
+
+  async function crearZona() {
+    if (!nzZona.trim()) { showFlash("⚠ Ingresa el nombre de la zona", false); return; }
+    const locs = generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols);
+    if (!locs.length) { showFlash("⚠ No se generaron localizadores", false); return; }
+    setSavingZona(true);
+    const records = locs.map(loc => ({
+      zona: nzZona.trim().toUpperCase(),
+      localizador: loc,
+      formato: nzFormato || "Mezcla",
+      capacidad: nzCapacidad,
+      ocupado: 0,
+      disponible: nzCapacidad,
+      pct_ocupacion: 0,
+      activo: true,
+    }));
+    const BATCH = 200;
+    let errors = 0;
+    for (let i = 0; i < records.length; i += BATCH) {
+      const { error } = await db.from("localizadores").upsert(records.slice(i, i + BATCH), { onConflict: "zona,localizador" });
+      if (error) errors++;
+    }
+    setSavingZona(false);
+    if (errors > 0) showFlash(`⚠ ${errors} lotes con error`, false);
+    else showFlash(`✓ Zona ${nzZona.toUpperCase()} creada con ${locs.length} localizadores`);
+    setShowNuevaZona(false);
+    setNzZona(""); setNzDesde(1); setNzHasta(10); setNzFilas(1); setNzCols(1); setNzPreview([]);
+    load();
   }
 
   async function saveEdit() {
@@ -181,12 +243,15 @@ export default function ConfiguracionPage() {
             <h1 style={s.title}>Gestión de Ubicaciones</h1>
             <p style={s.sub}>Modifica capacidad, formato, o bloquea ubicaciones para que no aparezcan en el mapa</p>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
             {selected.size > 0 && (
               <button style={s.btnBulk} onClick={() => setShowBulk(true)}>
                 ✎ Editar {selected.size} seleccionadas
               </button>
             )}
+            <button style={{ ...s.btnBulk, background: "#0c4a6e", borderColor: "#0ea5e9" }} onClick={() => { setShowNuevaZona(true); setNzPreview([]); }}>
+              + NUEVA ZONA
+            </button>
             <button style={s.btnRefresh} onClick={load}>↻ Recargar</button>
           </div>
         </div>
@@ -408,6 +473,90 @@ export default function ConfiguracionPage() {
                 {saving ? "Aplicando…" : `APLICAR A ${selected.size} UBICACIONES →`}
               </button>
               <button style={s.modalBtnCancel} onClick={() => setShowBulk(false)}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Nueva Zona */}
+      {showNuevaZona && (
+        <div style={s.overlay} onClick={() => setShowNuevaZona(false)}>
+          <div style={{ ...s.modalBox, maxWidth: 560 }} onClick={e => e.stopPropagation()}>
+            <div style={{ ...s.modalTitle, color: "#0ea5e9" }}>+ AGREGAR ZONA A LA BASE DE DATOS</div>
+            <p style={{ fontSize: 11, color: "#9ca3af", margin: "0 0 18px" }}>
+              Genera localizadores automáticamente con el patrón <code style={{ color: "#f97316" }}>ZONA.POS.FILA.COL</code>
+            </p>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px" }}>
+              <div>
+                <label style={s.fieldLabel}>NOMBRE DE ZONA *</label>
+                <input style={s.fieldInput} placeholder="Ej: ZONA16" value={nzZona}
+                  onChange={e => setNzZona(e.target.value.toUpperCase())} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>FORMATO / TIPO</label>
+                <input style={s.fieldInput} placeholder="Mezcla" value={nzFormato}
+                  onChange={e => setNzFormato(e.target.value)} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>POSICIÓN DESDE</label>
+                <input style={s.fieldInput} type="number" min={1} value={nzDesde}
+                  onChange={e => setNzDesde(Number(e.target.value))} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>POSICIÓN HASTA</label>
+                <input style={s.fieldInput} type="number" min={1} value={nzHasta}
+                  onChange={e => setNzHasta(Number(e.target.value))} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>FILAS POR POSICIÓN</label>
+                <input style={s.fieldInput} type="number" min={1} value={nzFilas}
+                  onChange={e => setNzFilas(Number(e.target.value))} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>COLUMNAS POR FILA</label>
+                <input style={s.fieldInput} type="number" min={1} value={nzCols}
+                  onChange={e => setNzCols(Number(e.target.value))} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>CAPACIDAD (pallets)</label>
+                <input style={s.fieldInput} type="number" min={1} value={nzCapacidad}
+                  onChange={e => setNzCapacidad(Number(e.target.value))} />
+              </div>
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <button style={{ ...s.modalBtn, background: "#1e3a5f", color: "#60a5fa", border: "1px solid rgba(96,165,250,0.3)", fontSize: 10 }}
+                  onClick={actualizarPreview}>
+                  👁 PREVISUALIZAR
+                </button>
+              </div>
+            </div>
+
+            {/* Preview */}
+            {nzPreview.length > 0 && (
+              <div style={{ marginTop: 14, background: "#080c14", border: "1px solid rgba(14,165,233,0.2)", borderRadius: 3, padding: "10px 14px" }}>
+                <div style={{ fontSize: 9, letterSpacing: 2, color: "#0ea5e9", marginBottom: 8 }}>
+                  PREVISUALIZACIÓN — {generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols).length} LOCALIZADORES
+                  {generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols).length > 30 && " (mostrando primeros 30)"}
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 5 }}>
+                  {nzPreview.map(loc => (
+                    <span key={loc} style={{ background: "#1e3a5f", color: "#93c5fd", fontSize: 10, padding: "2px 7px", borderRadius: 2, fontFamily: "monospace" }}>
+                      {loc}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+              <button
+                style={{ ...s.modalBtn, background: "#0c4a6e", color: "#fff", opacity: savingZona ? 0.6 : 1 }}
+                onClick={crearZona}
+                disabled={savingZona || !nzZona.trim()}
+              >
+                {savingZona ? "Creando…" : `CREAR ${generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols).length} LOCALIZADORES →`}
+              </button>
+              <button style={s.modalBtnCancel} onClick={() => setShowNuevaZona(false)}>Cancelar</button>
             </div>
           </div>
         </div>

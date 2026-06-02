@@ -10,6 +10,14 @@ import {
 
 const db = getBrowserClient();
 
+interface Operador {
+  id: string;
+  nombre: string;
+  email: string;
+  rol: string;
+  bodega_cedi: string;
+}
+
 type Modal =
   | { type: "aprobar" | "rechazar"; linea: Linea }
   | { type: "fraccionar"; linea: Linea }
@@ -25,18 +33,19 @@ const emptyNueva = {
 };
 
 export default function OrdenesPage() {
-  const [lineas, setLineas] = useState<Linea[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [lineas, setLineas]         = useState<Linea[]>([]);
+  const [operadores, setOperadores] = useState<Operador[]>([]);
+  const [loading, setLoading]       = useState(true);
   const [filtroEstado, setFiltroEstado] = useState("todos");
-  const [modal, setModal] = useState<Modal>(null);
-  const [notas, setNotas] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [flash, setFlash] = useState("");
-  const [nueva, setNueva] = useState(emptyNueva);
+  const [modal, setModal]           = useState<Modal>(null);
+  const [notas, setNotas]           = useState("");
+  const [saving, setSaving]         = useState(false);
+  const [flash, setFlash]           = useState("");
+  const [nueva, setNueva]           = useState(emptyNueva);
 
   // Inline responsable editing
-  const [editResp, setEditResp] = useState<{ id: string; value: string } | null>(null);
-  const [savingResp, setSavingResp] = useState<string | null>(null);
+  const [editResp, setEditResp]       = useState<{ id: string; value: string } | null>(null);
+  const [savingResp, setSavingResp]   = useState<string | null>(null);
 
   // Quick direct approval
   const [quickSaving, setQuickSaving] = useState<string | null>(null);
@@ -45,6 +54,7 @@ export default function OrdenesPage() {
   const [frac1, setFrac1] = useState({ pallets: 0, cajas: 0, cantidad_fisica: 0, localizador_destino: "", subinventario_destino: "" });
   const [frac2, setFrac2] = useState({ pallets: 0, cajas: 0, cantidad_fisica: 0, localizador_destino: "", subinventario_destino: "" });
 
+  // Load lines
   const load = useCallback(async () => {
     setLoading(true);
     const { data, error } = await db
@@ -53,6 +63,16 @@ export default function OrdenesPage() {
       .order("created_at", { ascending: false });
     if (!error && data) setLineas(data as Linea[]);
     setLoading(false);
+  }, []);
+
+  // Load operators from usuarios_bodega
+  useEffect(() => {
+    db.from("usuarios_bodega")
+      .select("id,nombre,email,rol,bodega_cedi")
+      .order("nombre")
+      .then(({ data }) => {
+        if (data) setOperadores(data as Operador[]);
+      });
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -239,20 +259,28 @@ export default function OrdenesPage() {
                     <td style={{ ...s.td, color: "#9ca3af", fontSize: 10 }}>{l.subinventario_destino || "—"}</td>
                     <td style={{ ...s.td, color: "#60a5fa", fontFamily: "monospace" }}>{l.localizador_destino || "—"}</td>
 
-                    {/* RESPONSABLE — editable inline */}
-                    <td style={{ ...s.td, minWidth: 120 }}>
+                    {/* RESPONSABLE — dropdown de operadores */}
+                    <td style={{ ...s.td, minWidth: 150 }}>
                       {isEditingResp ? (
                         <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
-                          <input
+                          <select
                             autoFocus
-                            style={s.respInput}
+                            style={s.respSelect}
                             value={editResp.value}
                             onChange={e => setEditResp({ id: l.id, value: e.target.value })}
                             onKeyDown={e => {
                               if (e.key === "Enter") saveResp(l.id, editResp.value);
                               if (e.key === "Escape") setEditResp(null);
                             }}
-                          />
+                          >
+                            <option value="">— sin asignar —</option>
+                            {operadores.map(op => (
+                              <option key={op.id} value={op.nombre || op.email}>
+                                {op.nombre || op.email}
+                                {op.bodega_cedi ? ` · ${op.bodega_cedi}` : ""}
+                              </option>
+                            ))}
+                          </select>
                           <button style={s.btnSaveSmall} onClick={() => saveResp(l.id, editResp.value)} disabled={savingResp === l.id}>✓</button>
                           <button style={s.btnCancelSmall} onClick={() => setEditResp(null)}>✗</button>
                         </div>
@@ -260,7 +288,7 @@ export default function OrdenesPage() {
                         <span
                           style={{ color: l.responsable ? "#e2e8f0" : "#6b7280", cursor: "pointer", borderBottom: "1px dashed rgba(249,115,22,0.35)", paddingBottom: 1, fontSize: 11 }}
                           onClick={() => setEditResp({ id: l.id, value: l.responsable || "" })}
-                          title="Clic para editar"
+                          title="Clic para asignar operador"
                         >
                           {l.responsable || "— asignar"}
                         </span>
@@ -427,7 +455,7 @@ export default function OrdenesPage() {
                 { k: "codigo", l: "CÓDIGO", ph: "231421E" },
                 { k: "descripcion", l: "DESCRIPCIÓN *", ph: "GALIA 23.3X41..." },
                 { k: "lote", l: "LOTE", ph: "T570A" },
-                { k: "responsable", l: "RESPONSABLE", ph: "CVIVAR_1" },
+                { k: "responsable", l: "RESPONSABLE", ph: "", dropdown: true },
                 { k: "subinventario_origen", l: "SI ORIGEN", ph: "ZONA09" },
                 { k: "localizador_origen", l: "LOC. ORIGEN", ph: "09.21.00.00" },
                 { k: "subinventario_destino", l: "SI DESTINO", ph: "ZONA15" },
@@ -440,9 +468,22 @@ export default function OrdenesPage() {
               ].map(f => (
                 <div key={f.k} style={{ display: "flex", flexDirection: "column" as const, gap: 4 }}>
                   <label style={s.fieldLabel}>{f.l}</label>
-                  <input style={s.fieldInput} type={f.num ? "number" : "text"} placeholder={f.ph}
-                    value={String(nueva[f.k as keyof typeof nueva])}
-                    onChange={e => setNueva(p => ({ ...p, [f.k]: f.num ? Number(e.target.value) : e.target.value }))} />
+                  {f.dropdown ? (
+                    <select style={s.fieldInput}
+                      value={String(nueva[f.k as keyof typeof nueva])}
+                      onChange={e => setNueva(p => ({ ...p, [f.k]: e.target.value }))}>
+                      <option value="">— sin asignar —</option>
+                      {operadores.map(op => (
+                        <option key={op.id} value={op.nombre || op.email}>
+                          {op.nombre || op.email}{op.bodega_cedi ? ` · ${op.bodega_cedi}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input style={s.fieldInput} type={f.num ? "number" : "text"} placeholder={f.ph}
+                      value={String(nueva[f.k as keyof typeof nueva])}
+                      onChange={e => setNueva(p => ({ ...p, [f.k]: f.num ? Number(e.target.value) : e.target.value }))} />
+                  )}
                 </div>
               ))}
             </div>
@@ -489,8 +530,8 @@ const s: { [k: string]: React.CSSProperties } = {
   ordenNum:         { color: "#f97316", fontWeight: 700, letterSpacing: 0.5, position: "relative" as const },
   fracTag:          { fontSize: 9, color: "#60a5fa", marginLeft: 4 },
   badge2:           { display: "inline-block", fontSize: 9, letterSpacing: 1, fontWeight: 700, padding: "2px 8px", borderRadius: 2 },
-  // Inline responsable editing
-  respInput:        { background: "#111827", border: "1px solid rgba(249,115,22,0.4)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "3px 6px", fontFamily: "'Courier New', monospace", width: 100, outline: "none" },
+  // Inline responsable dropdown
+  respSelect:       { background: "#111827", border: "1px solid rgba(249,115,22,0.4)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "3px 5px", fontFamily: "'Courier New', monospace", minWidth: 140, outline: "none", cursor: "pointer" },
   btnSaveSmall:     { background: "transparent", border: "1px solid rgba(74,222,128,0.4)", color: "#4ade80", fontSize: 11, padding: "2px 6px", cursor: "pointer", borderRadius: 2 },
   btnCancelSmall:   { background: "transparent", border: "1px solid rgba(248,113,113,0.3)", color: "#f87171", fontSize: 11, padding: "2px 6px", cursor: "pointer", borderRadius: 2 },
   // Action buttons

@@ -78,7 +78,8 @@ export default function SubirArchivoPage() {
         zona, localizador: loc,
         formato: String(r[CAL_LOC_COL.FORMATO] || "Mezcla").trim(),
         capacidad: cap, ocupado: ocup, disponible: disp,
-        pct_ocupacion: Math.round(pct * 10000) / 10000, activo: true,
+        pct_ocupacion: Math.round(pct * 10000) / 10000,
+        // activo no se incluye → los localizadores bloqueados (activo=false) mantienen su estado
       });
     }
 
