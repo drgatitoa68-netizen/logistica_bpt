@@ -1,0 +1,17 @@
+/**
+ * Returns a debounced version of fn that only fires after `ms` ms of silence.
+ * Used to throttle Supabase realtime callbacks under high write load.
+ */
+export function debounce<T extends (...args: unknown[]) => void>(
+  fn: T,
+  ms: number
+): (...args: Parameters<T>) => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return (...args: Parameters<T>) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn(...args);
+    }, ms);
+  };
+}
