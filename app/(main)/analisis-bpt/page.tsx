@@ -21,6 +21,7 @@ const CAL_LOC_COL = { ZONA: 1, LOC: 2, FORMATO: 3, CAPACIDAD: 10, OCUPADO: 14, D
 export default function AnalisisBPTPage() { const [allData, setAllData] = useState<Record<string, Localizador[]>>({}); const [loading, setLoading] = useState(true); const [connOk, setConnOk] = useState<boolean | null>(null); const [lastUpdate, setLastUpdate] = useState(""); const [lastImportInfo, setLastImportInfo] = useState("");
 const [fZone, setFZone] = useState("all"); const [fStatus, setFStatus] = useState("all"); const [fSearch, setFSearch] = useState("");
 const [subInvStock, setSubInvStock] = useState<Record<string, Record<string, number>>>({}); const [allSubInvs, setAllSubInvs] = useState<string[]>([]); const [selectedSubInv, setSelectedSubInv] = useState("all");
+const [storedItems, setStoredItems] = useState<SubInvItem[]>([]); const [procesando, setProcesando] = useState(false); const [procesadoInfo, setProcesadoInfo] = useState<{ count: number; subinv: string } | null>(null);
 // Plan de distribución
 const [sortingPlan, setSortingPlan] = useState<PlanEntry[]>([]);
 const [loadingPlan, setLoadingPlan] = useState(false);
@@ -351,11 +352,13 @@ try {
       }
       setSubInvStock(normalizedBySubInv);
       setAllSubInvs(subInvArr);
+      setStoredItems(subInvItems); // persist for PROCESAR button
+      setProcesadoInfo(null);
       const prodKey = subInvArr.find(s =>
         s.toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").includes("PRODUCCION")
       );
       if (prodKey) setSelectedSubInv(prodKey);
-      log(`✓ ${subInvArr.length} subinventarios cargados para visualización`);
+      log(`✓ ${subInvArr.length} subinventarios cargados — selecciona uno y presiona PROCESAR para crear líneas`);
     }
 
     setProgress(90);
@@ -410,6 +413,39 @@ try {
 } finally {
   setImporting(false);
 }
+}
+// ── PROCESAR: crea lineas_reubicacion desde el subinventario seleccionado ──
+async function procesarComoLineas() {
+  const items = storedItems.filter(item => item.subinv === selectedSubInv);
+  if (!items.length) { alert(`No hay ítems para ${selectedSubInv}`); return; }
+  setProcesando(true);
+  const now = new Date().toISOString();
+  const records = items.map(item => ({
+    descripcion:          `${item.subinv} · ${item.formato || "Sin formato"}`,
+    subinventario_origen: item.subinv,
+    localizador_origen:   item.loc,
+    lote:                 item.lote || null,
+    pallets:              item.pallets,
+    cajas:                0,
+    cantidad_fisica:      item.pallets,
+    estado:               "aprobada", // visible directo para operadores
+    created_at:           now,
+    updated_at:           now,
+  }));
+  let done = 0, errors = 0;
+  const BATCH = 50;
+  for (let i = 0; i < records.length; i += BATCH) {
+    const { error } = await db.from("lineas_reubicacion").insert(records.slice(i, i + BATCH));
+    if (error) errors++;
+    else done += records.slice(i, i + BATCH).length;
+  }
+  setProcesando(false);
+  if (errors === 0) {
+    setProcesadoInfo({ count: done, subinv: selectedSubInv });
+    setImportLog(p => [...p, { msg: `✅ ${done} líneas de ${selectedSubInv} enviadas a operadores`, cls: "ok" }]);
+  } else {
+    setImportLog(p => [...p, { msg: `⚠ ${done} creadas, ${errors} lotes con error`, cls: "warn" }]);
+  }
 }
 // ── Datos para render ──────────────────────────────────────────────────
 const zonasRender = fZone === "all" ? Object.keys(allData) : [fZone].filter(z => allData[z]);
@@ -541,7 +577,7 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
         </div>
 
         {selectedSubInv !== "all" && subInvStats && (
-          <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
             <div style={{ background: "#0f1117", borderRadius: 7, padding: "8px 14px", fontSize: 12 }}>
               <span style={{ color: "#8b8fa8" }}>Loc con </span>
               <strong style={{ color: "#60a5fa" }}>{selectedSubInv}</strong>
@@ -563,6 +599,36 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
                 {allLocs.filter(d => (d.ocupado || 0) > 0 && !((subInvMap ?? {})[d.localizador.toUpperCase()])).length}
               </span>
             </div>
+
+            {/* ── BOTÓN PROCESAR ─────────────────────────────────────── */}
+            {storedItems.filter(i => i.subinv === selectedSubInv).length > 0 && (
+              <div style={{ marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                {procesadoInfo?.subinv === selectedSubInv ? (
+                  <div style={{ background: "#0f2a0f", border: "1px solid #22c55e", borderRadius: 8, padding: "10px 16px", fontSize: 12, color: "#4ade80", textAlign: "center" as const }}>
+                    ✅ {procesadoInfo.count} líneas enviadas<br />
+                    <span style={{ fontSize: 10, color: "#86efac" }}>→ visibles en Operador</span>
+                  </div>
+                ) : (
+                  <button
+                    onClick={procesarComoLineas}
+                    disabled={procesando}
+                    style={{
+                      background: procesando ? "#374151" : "#16a34a",
+                      border: "none", color: "#fff",
+                      fontSize: 13, fontWeight: 700, letterSpacing: 1,
+                      padding: "12px 24px", borderRadius: 8, cursor: procesando ? "wait" : "pointer",
+                      opacity: procesando ? 0.7 : 1,
+                      boxShadow: "0 2px 8px rgba(22,163,74,0.4)",
+                    }}
+                  >
+                    {procesando ? "⟳ Procesando…" : `▶ PROCESAR ${storedItems.filter(i => i.subinv === selectedSubInv).length} LÍNEAS → OPERADORES`}
+                  </button>
+                )}
+                <span style={{ fontSize: 10, color: "#5a5e75", textAlign: "right" as const }}>
+                  Crea las líneas de {selectedSubInv} como aprobadas
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>
