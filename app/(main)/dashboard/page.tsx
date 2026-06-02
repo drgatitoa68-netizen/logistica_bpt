@@ -81,14 +81,14 @@ export default async function DashboardPage() {
 }
 
 const s: { [k: string]: React.CSSProperties } = {
-  root: { padding: "40px 32px", fontFamily: "'Courier New', monospace", color: "#e2e8f0", maxWidth: 900 },
+  root: { padding: "40px 32px", fontFamily: "'Courier New', monospace", color: "#1e293b", maxWidth: 900 },
   header: { marginBottom: 36, display: "flex", flexDirection: "column", gap: 8 },
   badge: { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", width: "fit-content" },
-  title: { margin: 0, fontSize: 28, fontWeight: 700, color: "#fff", letterSpacing: 1 },
-  sub: { margin: 0, fontSize: 12, color: "#4a5568" },
+  title: { margin: 0, fontSize: 28, fontWeight: 700, color: "#0f172a", letterSpacing: 1 },
+  sub: { margin: 0, fontSize: 12, color: "#64748b" },
   grid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 },
-  card: { background: "#0d1117", border: "1px solid", borderRadius: 4, padding: "28px 24px", display: "flex", flexDirection: "column", gap: 10, cursor: "pointer", transition: "background 0.2s", minHeight: 160 },
+  card: { background: "#ffffff", border: "1px solid", borderRadius: 4, padding: "28px 24px", display: "flex", flexDirection: "column", gap: 10, cursor: "pointer", transition: "background 0.2s", minHeight: 160 },
   cardLabel: { fontSize: 11, letterSpacing: 2, fontWeight: 700 },
-  cardDesc: { fontSize: 12, color: "#4a5568", lineHeight: 1.6 },
+  cardDesc: { fontSize: 12, color: "#64748b", lineHeight: 1.6 },
   arrow: { fontSize: 16, fontWeight: 700, marginTop: "auto" },
 };

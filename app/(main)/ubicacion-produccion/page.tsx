@@ -240,7 +240,7 @@ export default function UbicacionProduccionPage() {
       {/* Nota operativa */}
       <div style={s.noteBox}>
         <span style={s.noteIcon}>📋</span>
-        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.7 }}>
+        <div style={{ fontSize: 11, color: "#64748b", lineHeight: 1.7 }}>
           <strong style={{ color: "#fbbf24" }}>INSTRUCCIÓN OPERATIVA:</strong>{" "}
           Respetar las líneas y dejar la etiqueta al lado más ancho del localizador con la altura y condiciones propias de almacenamiento.{" "}
           <strong style={{ color: "#f87171" }}>Limpiar las áreas de donde se mueve el producto — NO se puede dejar basura en las mismas.</strong>
@@ -263,7 +263,7 @@ export default function UbicacionProduccionPage() {
         <span style={{ fontSize: 36 }}>📂</span>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Arrastra el Excel de Producción aquí</div>
-          <div style={{ fontSize: 11, color: "#4a5568", marginTop: 4 }}>
+          <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
             Hoja con nombre <code style={{ color: "#f97316" }}>PRODUCCION</code> · Columnas: Código, Descripción, Lote, Pallets, Cajas, etc.
           </div>
         </div>
@@ -351,13 +351,13 @@ export default function UbicacionProduccionPage() {
 
                 return (
                   <tr key={`${l.row_idx}-${i}`} style={{ ...s.tr, background: rowBg }}>
-                    <td style={{ ...s.td, color: "#374151", fontSize: 10 }}>{l.row_idx}</td>
+                    <td style={{ ...s.td, color: "#94a3b8", fontSize: 10 }}>{l.row_idx}</td>
                     <td style={{ ...s.td, color: "#6b7280" }}>{l.cod_org_inv || "—"}</td>
                     <td style={{ ...s.td, color: "#f97316", fontWeight: 700 }}>{l.codigo || "—"}</td>
                     <td style={{ ...s.td, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{l.descripcion}</td>
                     <td style={{ ...s.td, color: "#6b7280", fontSize: 10 }}>{l.subinventario_origen || "—"}</td>
-                    <td style={{ ...s.td, color: "#9ca3af", fontFamily: "monospace" }}>{l.localizador_origen || "—"}</td>
-                    <td style={{ ...s.td, color: "#9ca3af", fontFamily: "monospace", fontSize: 11 }}>{l.lote || "—"}</td>
+                    <td style={{ ...s.td, color: "#64748b", fontFamily: "monospace" }}>{l.localizador_origen || "—"}</td>
+                    <td style={{ ...s.td, color: "#64748b", fontFamily: "monospace", fontSize: 11 }}>{l.lote || "—"}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, color: "#6b7280" }}>{l.cantidad_fisica.toFixed(2)}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, fontWeight: 700, color: "#fbbf24" }}>{l.pallets}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, color: "#9ca3af" }}>{l.cajas}</td>
@@ -384,7 +384,7 @@ export default function UbicacionProduccionPage() {
                       />
                     </td>
                     <td style={{ ...s.td, color: "#6b7280", fontSize: 11 }}>{l.responsable || "—"}</td>
-                    <td style={{ ...s.td, textAlign: "right" as const, fontWeight: 700, color: "#e2e8f0" }}>{l.inv_pe || "—"}</td>
+                    <td style={{ ...s.td, textAlign: "right" as const, fontWeight: 700, color: "#1e293b" }}>{l.inv_pe || "—"}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, color: "#374151" }}>{l.conteo ?? "—"}</td>
                     <td style={s.td}>
                       <span style={{ ...s.badge2, background: l.sin_espacio ? "#2a0f0f" : l.is_fragment ? "#292010" : "#0f2a0f", color: statusColor }}>
@@ -402,8 +402,8 @@ export default function UbicacionProduccionPage() {
       {!plan.length && !loading && !progLabel && (
         <div style={s.empty}>
           <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
-          <div style={{ fontSize: 13, color: "#4a5568" }}>Sube el Excel de Producción para ver el plan de ubicación</div>
-          <div style={{ fontSize: 11, color: "#374151", marginTop: 8, maxWidth: 440, textAlign: "center" as const }}>
+          <div style={{ fontSize: 13, color: "#64748b" }}>Sube el Excel de Producción para ver el plan de ubicación</div>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 8, maxWidth: 440, textAlign: "center" as const }}>
             El algoritmo agrupa por código + lote, prioriza localizadores con formato compatible y mantiene la consistencia de zona por producto.
           </div>
         </div>
@@ -414,30 +414,30 @@ export default function UbicacionProduccionPage() {
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const s: { [k: string]: React.CSSProperties } = {
-  root:         { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#e2e8f0", minHeight: "100vh", background: "#0a0e17", position: "relative" },
-  flash:        { position: "fixed", top: 20, right: 24, background: "#0d1117", border: "1px solid", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
+  root:         { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#1e293b", minHeight: "100vh", background: "#f1f5f9", position: "relative" },
+  flash:        { position: "fixed", top: 20, right: 24, background: "#ffffff", border: "1px solid", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
   pageHeader:   { marginBottom: 14 },
   badge:        { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", marginBottom: 10 },
-  title:        { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#fff", letterSpacing: 1 },
-  sub:          { margin: 0, fontSize: 11, color: "#4a5568" },
-  noteBox:      { display: "flex", gap: 12, alignItems: "flex-start", background: "#0d1117", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 3, padding: "10px 14px", marginBottom: 16 },
+  title:        { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#0f172a", letterSpacing: 1 },
+  sub:          { margin: 0, fontSize: 11, color: "#64748b" },
+  noteBox:      { display: "flex", gap: 12, alignItems: "flex-start", background: "#ffffff", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 3, padding: "10px 14px", marginBottom: 16 },
   noteIcon:     { fontSize: 16, flexShrink: 0, marginTop: 1 },
   dropZone:     { border: "2px dashed", borderRadius: 4, padding: "28px 24px", display: "flex", flexWrap: "wrap" as const, alignItems: "center", gap: 16, cursor: "pointer", transition: "all 0.2s" },
   btnUpload:    { background: "#f97316", border: "none", color: "#000", fontSize: 11, fontWeight: 700, letterSpacing: 2, padding: "10px 20px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", whiteSpace: "nowrap" as const },
   progressTrack:{ height: 5, background: "#1e2235", borderRadius: 3, overflow: "hidden" },
   progressBar:  { height: "100%", borderRadius: 3, transition: "width 0.3s" },
-  logBox:       { background: "#080c14", border: "1px solid rgba(249,115,22,0.1)", borderRadius: 3, padding: "10px 14px", fontSize: 11, maxHeight: 150, overflowY: "auto" as const, fontFamily: "monospace", marginBottom: 14 },
+  logBox:       { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3, padding: "10px 14px", fontSize: 11, maxHeight: 150, overflowY: "auto" as const, fontFamily: "monospace", marginBottom: 14 },
   logLine:      { lineHeight: 1.6, whiteSpace: "pre-wrap" as const, marginBottom: 2 },
-  statChip:     { background: "#0d1117", border: "1px solid rgba(249,115,22,0.1)", borderRadius: 3, padding: "8px 16px", display: "flex", flexDirection: "column" as const, gap: 2, alignItems: "center", minWidth: 90 },
+  statChip:     { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3, padding: "8px 16px", display: "flex", flexDirection: "column" as const, gap: 2, alignItems: "center", minWidth: 90 },
   btnExport:    { background: "transparent", border: "1px solid rgba(96,165,250,0.3)", color: "#60a5fa", fontSize: 10, letterSpacing: 1.5, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", fontWeight: 600 },
   btnCreate:    { background: "#16a34a", border: "none", color: "#fff", fontSize: 10, letterSpacing: 1.5, padding: "8px 16px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", fontWeight: 700 },
-  tableWrap:    { overflowX: "auto" as const, border: "1px solid rgba(249,115,22,0.1)", borderRadius: 3 },
+  tableWrap:    { overflowX: "auto" as const, border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3 },
   table:        { width: "100%", borderCollapse: "collapse" as const, fontSize: 11 },
-  thead:        { borderBottom: "1px solid rgba(249,115,22,0.15)", background: "#080c14" },
-  th:           { padding: "6px 8px", textAlign: "left" as const, fontSize: 9, letterSpacing: 1.5, color: "#374151", fontWeight: 700, whiteSpace: "nowrap" as const },
+  thead:        { borderBottom: "1px solid rgba(249,115,22,0.15)", background: "#f8fafc" },
+  th:           { padding: "6px 8px", textAlign: "left" as const, fontSize: 9, letterSpacing: 1.5, color: "#94a3b8", fontWeight: 700, whiteSpace: "nowrap" as const },
   tr:           { borderBottom: "1px solid rgba(249,115,22,0.04)" },
   td:           { padding: "6px 8px", verticalAlign: "middle" as const, whiteSpace: "nowrap" as const },
-  destInput:    { background: "#080c14", border: "1px solid", borderRadius: 2, color: "#4ade80", fontSize: 11, padding: "3px 6px", fontFamily: "'Courier New', monospace", width: 120, outline: "none" },
+  destInput:    { background: "#f8fafc", border: "1px solid", borderRadius: 2, color: "#4ade80", fontSize: 11, padding: "3px 6px", fontFamily: "'Courier New', monospace", width: 120, outline: "none" },
   badge2:       { display: "inline-block", fontSize: 9, letterSpacing: 1, fontWeight: 700, padding: "2px 7px", borderRadius: 2 },
-  empty:        { textAlign: "center" as const, color: "#374151", padding: "60px 20px", border: "1px dashed rgba(249,115,22,0.1)", borderRadius: 4, display: "flex", flexDirection: "column" as const, alignItems: "center" },
+  empty:        { textAlign: "center" as const, color: "#94a3b8", padding: "60px 20px", border: "1px dashed rgba(249,115,22,0.1)", borderRadius: 4, display: "flex", flexDirection: "column" as const, alignItems: "center" },
 };

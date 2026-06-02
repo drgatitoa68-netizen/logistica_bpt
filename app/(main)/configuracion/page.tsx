@@ -290,7 +290,7 @@ export default function ConfiguracionPage() {
           <option value="activo">Solo activas</option>
           <option value="bloqueado">Solo bloqueadas</option>
         </select>
-        <span style={{ fontSize: 11, color: "#4a5568", marginLeft: "auto" }}>
+        <span style={{ fontSize: 11, color: "#64748b", marginLeft: "auto" }}>
           {filtered.length} / {rows.length} ubicaciones
         </span>
       </div>
@@ -349,7 +349,7 @@ export default function ConfiguracionPage() {
                         </div>
                       ) : (
                         <span
-                          style={{ color: "#9ca3af", cursor: "pointer", borderBottom: "1px dashed rgba(249,115,22,0.3)" }}
+                          style={{ color: "#64748b", cursor: "pointer", borderBottom: "1px dashed rgba(249,115,22,0.3)" }}
                           onClick={() => setEdit({ localizador: r.localizador, zona: r.zona, field: "formato", value: r.formato || "" })}
                           title="Click para editar"
                         >
@@ -374,7 +374,7 @@ export default function ConfiguracionPage() {
                         </div>
                       ) : (
                         <span
-                          style={{ color: "#e2e8f0", cursor: "pointer", borderBottom: "1px dashed rgba(249,115,22,0.3)", fontWeight: 700 }}
+                          style={{ color: "#1e293b", cursor: "pointer", borderBottom: "1px dashed rgba(249,115,22,0.3)", fontWeight: 700 }}
                           onClick={() => setEdit({ localizador: r.localizador, zona: r.zona, field: "capacidad", value: r.capacidad })}
                           title="Click para editar"
                         >
@@ -424,7 +424,7 @@ export default function ConfiguracionPage() {
         <div style={s.overlay} onClick={() => setShowBulk(false)}>
           <div style={s.modalBox} onClick={e => e.stopPropagation()}>
             <div style={s.modalTitle}>✎ EDICIÓN MASIVA — {selected.size} UBICACIONES</div>
-            <p style={{ fontSize: 11, color: "#4a5568", margin: "0 0 16px" }}>
+            <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 16px" }}>
               Solo los campos que completes serán actualizados. Deja vacío lo que no quieras cambiar.
             </p>
 
@@ -483,7 +483,7 @@ export default function ConfiguracionPage() {
         <div style={s.overlay} onClick={() => setShowNuevaZona(false)}>
           <div style={{ ...s.modalBox, maxWidth: 560 }} onClick={e => e.stopPropagation()}>
             <div style={{ ...s.modalTitle, color: "#0ea5e9" }}>+ AGREGAR ZONA A LA BASE DE DATOS</div>
-            <p style={{ fontSize: 11, color: "#9ca3af", margin: "0 0 18px" }}>
+            <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 18px" }}>
               Genera localizadores automáticamente con el patrón <code style={{ color: "#f97316" }}>ZONA.POS.FILA.COL</code>
             </p>
 
@@ -533,7 +533,7 @@ export default function ConfiguracionPage() {
 
             {/* Preview */}
             {nzPreview.length > 0 && (
-              <div style={{ marginTop: 14, background: "#080c14", border: "1px solid rgba(14,165,233,0.2)", borderRadius: 3, padding: "10px 14px" }}>
+              <div style={{ marginTop: 14, background: "#f8fafc", border: "1px solid rgba(14,165,233,0.2)", borderRadius: 3, padding: "10px 14px" }}>
                 <div style={{ fontSize: 9, letterSpacing: 2, color: "#0ea5e9", marginBottom: 8 }}>
                   PREVISUALIZACIÓN — {generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols).length} LOCALIZADORES
                   {generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols).length > 30 && " (mostrando primeros 30)"}
@@ -566,37 +566,37 @@ export default function ConfiguracionPage() {
 }
 
 const s: { [k: string]: React.CSSProperties } = {
-  root: { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#e2e8f0", minHeight: "100vh", background: "#0a0e17", position: "relative" },
-  flash: { position: "fixed", top: 20, right: 24, background: "#0d1117", border: "1px solid", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
+  root: { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#1e293b", minHeight: "100vh", background: "#f1f5f9", position: "relative" },
+  flash: { position: "fixed", top: 20, right: 24, background: "#ffffff", border: "1px solid", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
   pageHeader: { marginBottom: 20 },
   badge: { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", marginBottom: 10 },
-  title: { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#fff", letterSpacing: 1 },
-  sub: { margin: 0, fontSize: 11, color: "#4a5568" },
+  title: { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#0f172a", letterSpacing: 1 },
+  sub: { margin: 0, fontSize: 11, color: "#64748b" },
   btnBulk: { background: "#1d4ed8", border: "none", color: "#fff", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  btnRefresh: { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#4a5568", fontSize: 11, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
+  btnRefresh: { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#64748b", fontSize: 11, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   statsRow: { display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" as const },
-  statCard: { background: "#0d1117", border: "1px solid rgba(249,115,22,0.1)", borderRadius: 3, padding: "10px 18px", flex: 1, minWidth: 100 },
-  statLabel: { fontSize: 9, letterSpacing: 2, color: "#374151", marginTop: 3 },
+  statCard: { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3, padding: "10px 18px", flex: 1, minWidth: 100 },
+  statLabel: { fontSize: 9, letterSpacing: 2, color: "#94a3b8", marginTop: 3 },
   filters: { display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" as const, alignItems: "center" },
-  searchInput: { background: "#0d1117", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "7px 10px", fontFamily: "'Courier New', monospace", outline: "none", minWidth: 180 },
-  select: { background: "#0d1117", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "7px 10px", fontFamily: "'Courier New', monospace", outline: "none" },
-  loading: { textAlign: "center" as const, color: "#4a5568", padding: 40, fontSize: 12 },
-  tableWrap: { overflowX: "auto" as const, border: "1px solid rgba(249,115,22,0.1)", borderRadius: 3 },
+  searchInput: { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#1e293b", fontSize: 11, padding: "7px 10px", fontFamily: "'Courier New', monospace", outline: "none", minWidth: 180 },
+  select: { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#1e293b", fontSize: 11, padding: "7px 10px", fontFamily: "'Courier New', monospace", outline: "none" },
+  loading: { textAlign: "center" as const, color: "#64748b", padding: 40, fontSize: 12 },
+  tableWrap: { overflowX: "auto" as const, border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3 },
   table: { width: "100%", borderCollapse: "collapse" as const, fontSize: 11 },
-  thead: { borderBottom: "1px solid rgba(249,115,22,0.15)", background: "#080c14" },
-  th: { padding: "7px 10px", textAlign: "left" as const, fontSize: 9, letterSpacing: 1.5, color: "#374151", fontWeight: 700, whiteSpace: "nowrap" as const, userSelect: "none" as const },
+  thead: { borderBottom: "1px solid rgba(249,115,22,0.15)", background: "#f8fafc" },
+  th: { padding: "7px 10px", textAlign: "left" as const, fontSize: 9, letterSpacing: 1.5, color: "#94a3b8", fontWeight: 700, whiteSpace: "nowrap" as const, userSelect: "none" as const },
   tr: { borderBottom: "1px solid rgba(249,115,22,0.04)" },
   td: { padding: "7px 10px", verticalAlign: "middle" as const, whiteSpace: "nowrap" as const },
-  inlineInput: { background: "#0a0e17", border: "1px solid rgba(249,115,22,0.4)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "4px 7px", fontFamily: "'Courier New', monospace", outline: "none", width: 120 },
+  inlineInput: { background: "#f1f5f9", border: "1px solid rgba(249,115,22,0.4)", borderRadius: 2, color: "#1e293b", fontSize: 11, padding: "4px 7px", fontFamily: "'Courier New', monospace", outline: "none", width: 120 },
   btnSave: { background: "transparent", border: "1px solid rgba(74,222,128,0.4)", color: "#4ade80", fontSize: 11, padding: "4px 8px", cursor: "pointer", borderRadius: 2 },
   btnCancel: { background: "transparent", border: "1px solid rgba(248,113,113,0.4)", color: "#f87171", fontSize: 11, padding: "4px 8px", cursor: "pointer", borderRadius: 2 },
   actionBtn: { background: "transparent", border: "1px solid", fontSize: 10, padding: "4px 8px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", letterSpacing: 0.5 },
-  empty: { textAlign: "center" as const, color: "#374151", padding: 40, fontSize: 12 },
+  empty: { textAlign: "center" as const, color: "#94a3b8", padding: 40, fontSize: 12 },
   overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 },
-  modalBox: { background: "#0d1117", border: "1px solid rgba(249,115,22,0.3)", borderRadius: 4, padding: "24px 28px", width: "100%", maxWidth: 480 },
+  modalBox: { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.3)", borderRadius: 4, padding: "24px 28px", width: "100%", maxWidth: 480 },
   modalTitle: { fontSize: 13, fontWeight: 700, letterSpacing: 2, marginBottom: 14, color: "#f97316" },
   fieldLabel: { fontSize: 9, letterSpacing: 2, color: "#f97316", display: "block" as const, marginBottom: 6, fontWeight: 600 },
-  fieldInput: { background: "#0a0e17", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "7px 9px", fontFamily: "'Courier New', monospace", width: "100%", boxSizing: "border-box" as const, outline: "none" },
+  fieldInput: { background: "#f1f5f9", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#1e293b", fontSize: 11, padding: "7px 9px", fontFamily: "'Courier New', monospace", width: "100%", boxSizing: "border-box" as const, outline: "none" },
   toggleOpt: { border: "1px solid rgba(249,115,22,0.3)", fontSize: 10, letterSpacing: 1, padding: "5px 10px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   modalBtn: { border: "none", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "10px 16px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   modalBtnCancel: { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#6b7280", fontSize: 10, letterSpacing: 1, padding: "10px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },

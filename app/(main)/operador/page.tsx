@@ -124,7 +124,7 @@ export default function OperadorPage() {
           { k: "aprobada",   label: "POR INICIAR",  color: "#4ade80" },
           { k: "en_proceso", label: "EN PROCESO",   color: "#60a5fa" },
           { k: "completada", label: "COMPLETADAS",  color: "#a78bfa" },
-          { k: "todas",      label: "TODAS",        color: "#e2e8f0" },
+          { k: "todas",      label: "TODAS",        color: "#1e293b" },
         ] as const).map(f => (
           <button key={f.k} onClick={() => setFiltro(f.k)}
             style={{ ...s.filterBtn, borderColor: filtro === f.k ? f.color : "rgba(249,115,22,0.15)", color: filtro === f.k ? f.color : "#4a5568", background: filtro === f.k ? `${f.color}18` : "transparent" }}>
@@ -168,7 +168,7 @@ export default function OperadorPage() {
                     {isCompletada && l.duracion_minutos != null && (
                       <span style={{ color: "#a78bfa", fontSize: 11, fontFamily: "monospace" }}>{l.duracion_minutos.toFixed(1)} min</span>
                     )}
-                    <span style={{ color: "#374151", fontSize: 11 }}>{isExpanded ? "▲" : "▼"}</span>
+                    <span style={{ color: "#94a3b8", fontSize: 11 }}>{isExpanded ? "▲" : "▼"}</span>
                   </div>
                 </div>
 
@@ -189,12 +189,12 @@ export default function OperadorPage() {
                   <div style={{ flex: 1, minWidth: 80 }}>
                     <div style={s.chipLabel}>DESTINO</div>
                     <div style={{ color: "#60a5fa", fontFamily: "monospace", fontSize: 13, fontWeight: 700 }}>{l.localizador_destino || "—"}</div>
-                    <div style={{ color: "#374151", fontSize: 10 }}>{l.subinventario_destino || ""}</div>
+                    <div style={{ color: "#94a3b8", fontSize: 10 }}>{l.subinventario_destino || ""}</div>
                   </div>
                   <div style={{ flex: 1, minWidth: 80 }}>
                     <div style={s.chipLabel}>ORIGEN</div>
-                    <div style={{ color: "#e2e8f0", fontFamily: "monospace", fontSize: 12 }}>{l.localizador_origen || "—"}</div>
-                    <div style={{ color: "#374151", fontSize: 10 }}>{l.subinventario_origen || ""}</div>
+                    <div style={{ color: "#1e293b", fontFamily: "monospace", fontSize: 12 }}>{l.localizador_origen || "—"}</div>
+                    <div style={{ color: "#94a3b8", fontSize: 10 }}>{l.subinventario_origen || ""}</div>
                   </div>
                 </div>
 
@@ -254,7 +254,7 @@ export default function OperadorPage() {
                 {isCompletada && (
                   <div style={s.completedBanner}>
                     ✓ COMPLETADA{l.duracion_minutos != null ? ` en ${l.duracion_minutos.toFixed(1)} min` : ""}
-                    {l.fin_operador && <span style={{ color: "#4a5568" }}> · {new Date(l.fin_operador).toLocaleTimeString("es-EC")}</span>}
+                    {l.fin_operador && <span style={{ color: "#64748b" }}> · {new Date(l.fin_operador).toLocaleTimeString("es-EC")}</span>}
                   </div>
                 )}
               </div>
@@ -267,37 +267,37 @@ export default function OperadorPage() {
 }
 
 const s: { [k: string]: React.CSSProperties } = {
-  root: { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#e2e8f0", minHeight: "100vh", background: "#0a0e17", position: "relative" },
-  flash: { position: "fixed", top: 20, right: 24, background: "#0d1117", border: "1px solid rgba(249,115,22,0.4)", color: "#f97316", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
+  root: { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#1e293b", minHeight: "100vh", background: "#f1f5f9", position: "relative" },
+  flash: { position: "fixed", top: 20, right: 24, background: "#ffffff", border: "1px solid rgba(249,115,22,0.4)", color: "#f97316", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
   pageHeader: { marginBottom: 20 },
   badge: { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", marginBottom: 10 },
-  title: { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#fff", letterSpacing: 1 },
-  sub: { margin: 0, fontSize: 11, color: "#4a5568" },
+  title: { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#0f172a", letterSpacing: 1 },
+  sub: { margin: 0, fontSize: 11, color: "#64748b" },
   statsRow: { display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 18 },
-  statCard: { background: "#0d1117", border: "1px solid rgba(249,115,22,0.1)", borderRadius: 3, padding: "12px 16px" },
-  statLabel: { fontSize: 9, letterSpacing: 2, color: "#374151", marginTop: 3, fontWeight: 600 },
+  statCard: { background: "#ffffff", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3, padding: "12px 16px" },
+  statLabel: { fontSize: 9, letterSpacing: 2, color: "#94a3b8", marginTop: 3, fontWeight: 600 },
   filters: { display: "flex", gap: 7, marginBottom: 18, flexWrap: "wrap" as const, alignItems: "center" },
   filterBtn: { border: "1px solid", fontSize: 10, letterSpacing: 1.5, padding: "6px 13px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", fontWeight: 600 },
-  refreshBtn: { background: "transparent", border: "1px solid rgba(249,115,22,0.15)", color: "#4a5568", fontSize: 11, padding: "6px 12px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", marginLeft: "auto" },
-  loading: { textAlign: "center" as const, color: "#4a5568", padding: 50, fontSize: 12 },
-  empty: { textAlign: "center" as const, color: "#374151", padding: 50, fontSize: 13, border: "1px dashed rgba(249,115,22,0.1)", borderRadius: 4 },
+  refreshBtn: { background: "transparent", border: "1px solid rgba(249,115,22,0.3)", color: "#64748b", fontSize: 11, padding: "6px 12px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", marginLeft: "auto" },
+  loading: { textAlign: "center" as const, color: "#64748b", padding: 50, fontSize: 12 },
+  empty: { textAlign: "center" as const, color: "#94a3b8", padding: 50, fontSize: 13, border: "1px dashed rgba(249,115,22,0.1)", borderRadius: 4 },
   cards: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(360px,1fr))", gap: 12 },
-  card: { background: "#0d1117", border: "1px solid", borderRadius: 4, overflow: "hidden" },
+  card: { background: "#ffffff", border: "1px solid", borderRadius: 4, overflow: "hidden" },
   cardHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", cursor: "pointer", borderBottom: "1px solid rgba(249,115,22,0.06)" },
   ordenNum: { fontSize: 11, fontWeight: 700, color: "#f97316", letterSpacing: 1 },
   fracTag: { fontSize: 9, color: "#60a5fa", fontWeight: 400 },
-  producto: { fontSize: 13, color: "#e2e8f0", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const },
+  producto: { fontSize: 13, color: "#1e293b", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const },
   quickRow: { display: "flex", gap: 14, padding: "12px 16px", borderBottom: "1px solid rgba(249,115,22,0.06)", flexWrap: "wrap" as const },
   chip: { display: "flex", flexDirection: "column" as const, gap: 2 },
-  chipLabel: { fontSize: 8, letterSpacing: 2, color: "#374151", fontWeight: 600 },
-  chipVal: { fontSize: 18, fontWeight: 700, color: "#e2e8f0" },
+  chipLabel: { fontSize: 8, letterSpacing: 2, color: "#94a3b8", fontWeight: 600 },
+  chipVal: { fontSize: 18, fontWeight: 700, color: "#1e293b" },
   detail: { padding: "12px 16px", borderBottom: "1px solid rgba(249,115,22,0.06)" },
   detailGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", marginBottom: 10 },
-  detailKey: { fontSize: 8, letterSpacing: 2, color: "#374151", fontWeight: 600, marginBottom: 2 },
-  detailVal: { fontSize: 11, color: "#e2e8f0" },
-  notaBox: { background: "#0a0e17", border: "1px solid rgba(96,165,250,0.15)", borderRadius: 3, padding: "8px 12px" },
+  detailKey: { fontSize: 8, letterSpacing: 2, color: "#94a3b8", fontWeight: 600, marginBottom: 2 },
+  detailVal: { fontSize: 11, color: "#1e293b" },
+  notaBox: { background: "#f1f5f9", border: "1px solid rgba(96,165,250,0.15)", borderRadius: 3, padding: "8px 12px" },
   notaLabel: { fontSize: 8, letterSpacing: 2, color: "#60a5fa", marginBottom: 5, fontWeight: 600 },
-  notaText: { fontSize: 11, color: "#9ca3af", lineHeight: 1.6 },
+  notaText: { fontSize: 11, color: "#64748b", lineHeight: 1.6 },
   actions: { padding: "12px 16px" },
   actionBtn: { width: "100%", background: "transparent", border: "1px solid", fontSize: 11, fontWeight: 700, letterSpacing: 1.5, padding: "11px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   completedBanner: { padding: "10px 16px", fontSize: 11, fontWeight: 700, letterSpacing: 1.5, color: "#a78bfa", background: "rgba(167,139,250,0.06)", textAlign: "center" as const },
