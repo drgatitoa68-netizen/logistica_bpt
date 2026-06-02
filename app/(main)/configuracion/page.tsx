@@ -174,50 +174,63 @@ export default function ConfiguracionPage() {
       .eq("localizador", edit.localizador);
     setSaving(false);
     if (error) { showFlash("❌ " + error.message, false); return; }
+    setRows(prev => prev.map(r =>
+      r.zona === edit.zona && r.localizador === edit.localizador
+        ? { ...r, [edit.field]: edit.value }
+        : r
+    ));
     showFlash(`✓ ${edit.localizador} — ${edit.field} actualizado`);
     setEdit(null);
-    load();
   }
 
   async function toggleBlock(r: Localizador) {
     setSaving(true);
+    const newActivo = !r.activo;
     const { error } = await db
       .from("localizadores")
-      .update({ activo: !r.activo })
+      .update({ activo: newActivo })
       .eq("zona", r.zona)
       .eq("localizador", r.localizador);
     setSaving(false);
     if (error) { showFlash("❌ " + error.message, false); return; }
+    setRows(prev => prev.map(row =>
+      row.zona === r.zona && row.localizador === r.localizador
+        ? { ...row, activo: newActivo }
+        : row
+    ));
     showFlash(`✓ ${r.localizador} ${r.activo ? "bloqueado" : "desbloqueado"}`);
-    load();
   }
 
   async function applyBulk() {
-    const targets = filtered.filter(r => selected.has(key(r)));
-    if (!targets.length) { showFlash("⚠ Selecciona al menos una fila", false); return; }
-    const updates: Partial<Localizador> = {};
-    if (bulkActivo !== null) updates.activo = bulkActivo;
-    if (bulkCapacidad !== "") updates.capacidad = Number(bulkCapacidad);
-    if (!Object.keys(updates).length) { showFlash("⚠ Define al menos un cambio", false); return; }
+    if (bulkActivo === null && bulkCapacidad === "") { showFlash("⚠ Define al menos un cambio", false); return; }
+    const newCapacidad = bulkCapacidad !== "" ? Number(bulkCapacidad) : undefined;
+
+    const targets = filtered.filter(r => {
+      if (!selected.has(key(r))) return false;
+      if (bulkActivo !== null && r.activo !== bulkActivo) return true;
+      if (newCapacidad !== undefined && r.capacidad !== newCapacidad) return true;
+      return false;
+    });
+    if (!targets.length) { showFlash("⚠ Selecciona al menos una fila (o no hay cambios reales)", false); return; }
 
     setSaving(true);
-    let errCount = 0;
-    for (const r of targets) {
-      const { error } = await db
-        .from("localizadores")
-        .update(updates)
-        .eq("zona", r.zona)
-        .eq("localizador", r.localizador);
-      if (error) errCount++;
-    }
+    const payload = targets.map(r => ({
+      ...r,
+      ...(bulkActivo !== null ? { activo: bulkActivo } : {}),
+      ...(newCapacidad !== undefined ? { capacidad: newCapacidad } : {}),
+    }));
+    const { error } = await db.from("localizadores").upsert(payload, { onConflict: "zona,localizador" });
     setSaving(false);
-    if (errCount > 0) showFlash(`⚠ ${errCount} errores al actualizar`, false);
-    else showFlash(`✓ ${targets.length} ubicaciones actualizadas`);
+    if (error) { showFlash(`❌ ${error.message}`, false); return; }
+    setRows(prev => prev.map(r => {
+      const updated = payload.find(p => p.zona === r.zona && p.localizador === r.localizador);
+      return updated ?? r;
+    }));
+    showFlash(`✓ ${targets.length} ubicaciones actualizadas`);
     setSelected(new Set());
     setBulkActivo(null);
     setBulkCapacidad("");
     setShowBulk(false);
-    load();
   }
 
   const stats = {

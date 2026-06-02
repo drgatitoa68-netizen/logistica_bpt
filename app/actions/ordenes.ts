@@ -165,7 +165,7 @@ export async function fraccionarLinea(
   return { ok: true };
 }
 
-export async function crearLinea(data: {
+type LineaInput = {
   numero_orden?: string;
   cod_org_inv?: string;
   codigo?: string;
@@ -181,7 +181,9 @@ export async function crearLinea(data: {
   responsable?: string;
   inv_pe?: number;
   notas?: string;
-}) {
+};
+
+export async function crearLinea(data: LineaInput) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: "No autenticado" };
@@ -192,6 +194,21 @@ export async function crearLinea(data: {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
+
+  if (error) return { error: error.message };
+  revalidate();
+  return { ok: true };
+}
+
+export async function crearLineas(lines: LineaInput[]) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: "No autenticado" };
+
+  const now = new Date().toISOString();
+  const { error } = await supabase.from(TABLE).insert(
+    lines.map(data => ({ ...data, estado: "pendiente", created_at: now, updated_at: now }))
+  );
 
   if (error) return { error: error.message };
   revalidate();

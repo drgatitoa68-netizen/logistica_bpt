@@ -432,13 +432,12 @@ async function procesarComoLineas() {
     created_at:           now,
     updated_at:           now,
   }));
-  let done = 0, errors = 0;
   const BATCH = 50;
-  for (let i = 0; i < records.length; i += BATCH) {
-    const { error } = await db.from("lineas_reubicacion").insert(records.slice(i, i + BATCH));
-    if (error) errors++;
-    else done += records.slice(i, i + BATCH).length;
-  }
+  const batches: typeof records[] = [];
+  for (let i = 0; i < records.length; i += BATCH) batches.push(records.slice(i, i + BATCH));
+  const results = await Promise.all(batches.map(b => db.from("lineas_reubicacion").insert(b)));
+  let done = 0, errors = 0;
+  results.forEach((r, i) => { if (r.error) errors++; else done += batches[i].length; });
   setProcesando(false);
   if (errors === 0) {
     setProcesadoInfo({ count: done, subinv: selectedSubInv });

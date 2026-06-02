@@ -42,7 +42,7 @@ export default function OperadorPage() {
     setLoading(true);
     const { data, error } = await db
       .from("lineas_reubicacion")
-      .select("*")
+      .select("id,numero_orden,es_fraccion,descripcion,codigo,estado,pallets,cajas,localizador_destino,subinventario_destino,localizador_origen,subinventario_origen,lote,cantidad_fisica,responsable,inv_pe,conteo,inicio_operador,fin_operador,duracion_minutos,notas_supervisor,updated_at")
       .in("estado", ["aprobada", "en_proceso", "completada"])
       .order("updated_at", { ascending: false });
     if (!error && data) setLineas(data as Linea[]);
@@ -66,8 +66,11 @@ export default function OperadorPage() {
     const res = await iniciarLinea(id);
     setSaving(null);
     if (res?.error) { showFlash("❌ " + res.error); return; }
+    const now = new Date().toISOString();
+    setLineas(prev => prev.map(l =>
+      l.id === id ? { ...l, estado: "en_proceso", inicio_operador: now, updated_at: now } : l
+    ));
     showFlash("⚙ Tarea iniciada — ¡a trabajar!");
-    load();
   }
 
   async function handleFinalizar(id: string, inicioIso: string) {
@@ -75,8 +78,12 @@ export default function OperadorPage() {
     const res = await finalizarLinea(id, inicioIso);
     setSaving(null);
     if (res?.error) { showFlash("❌ " + res.error); return; }
-    showFlash(`✓ Tarea completada en ${res.duracion?.toFixed(1)} min`);
-    load();
+    const fin = new Date();
+    const duracion = Math.round(((fin.getTime() - new Date(inicioIso).getTime()) / 60000) * 100) / 100;
+    setLineas(prev => prev.map(l =>
+      l.id === id ? { ...l, estado: "completada", fin_operador: fin.toISOString(), duracion_minutos: duracion, updated_at: fin.toISOString() } : l
+    ));
+    showFlash(`✓ Tarea completada en ${duracion.toFixed(1)} min`);
   }
 
   const filtradas = filtro === "todas" ? lineas : lineas.filter(l => l.estado === filtro);

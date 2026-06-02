@@ -4,7 +4,7 @@ import { useRef, useState, useCallback } from "react";
 import * as XLSX from "xlsx";
 import { getBrowserClient } from "@/lib/supabase/browser";
 import type { AssignedLine } from "@/app/api/plan-ubicacion/route";
-import { crearLinea } from "@/app/actions/ordenes";
+import { crearLineas } from "@/app/actions/ordenes";
 
 const db = getBrowserClient();
 
@@ -168,31 +168,25 @@ export default function UbicacionProduccionPage() {
     const toCreate = plan.filter(l => !l.sin_espacio && l.localizador_destino !== "SIN PALLETS");
     if (!toCreate.length) { showFlash("⚠ No hay líneas para crear", false); return; }
     setCreating(true);
-    let ok = 0, err = 0;
-    for (const l of toCreate) {
-      const dest = editDest.get(l.row_idx) ?? l.localizador_destino;
-      const res  = await crearLinea({
-        numero_orden:           undefined,
-        cod_org_inv:            l.cod_org_inv || undefined,
-        codigo:                 l.codigo || undefined,
-        descripcion:            l.descripcion,
-        subinventario_origen:   l.subinventario_origen || undefined,
-        localizador_origen:     l.localizador_origen || undefined,
-        lote:                   l.lote || undefined,
-        cantidad_fisica:        l.cantidad_fisica,
-        pallets:                l.pallets_efectivos,
-        cajas:                  l.cajas,
-        subinventario_destino:  l.subinventario_destino || undefined,
-        localizador_destino:    dest || undefined,
-        responsable:            l.responsable || undefined,
-        inv_pe:                 l.inv_pe,
-        notas:                  l.is_fragment ? "Fragmento de lote" : undefined,
-      });
-      if (res?.error) err++; else ok++;
-    }
+    const res = await crearLineas(toCreate.map(l => ({
+      cod_org_inv:            l.cod_org_inv || undefined,
+      codigo:                 l.codigo || undefined,
+      descripcion:            l.descripcion,
+      subinventario_origen:   l.subinventario_origen || undefined,
+      localizador_origen:     l.localizador_origen || undefined,
+      lote:                   l.lote || undefined,
+      cantidad_fisica:        l.cantidad_fisica,
+      pallets:                l.pallets_efectivos,
+      cajas:                  l.cajas,
+      subinventario_destino:  l.subinventario_destino || undefined,
+      localizador_destino:    (editDest.get(l.row_idx) ?? l.localizador_destino) || undefined,
+      responsable:            l.responsable || undefined,
+      inv_pe:                 l.inv_pe,
+      notas:                  l.is_fragment ? "Fragmento de lote" : undefined,
+    })));
     setCreating(false);
-    if (err > 0) showFlash(`⚠ ${ok} creadas · ${err} errores`, false);
-    else showFlash(`✓ ${ok} órdenes creadas → Órdenes de Producción`);
+    if (res?.error) showFlash(`❌ Error: ${res.error}`, false);
+    else showFlash(`✓ ${toCreate.length} órdenes creadas → Órdenes de Producción`);
   }
 
   // ── Export to Excel ───────────────────────────────────────────────────────
