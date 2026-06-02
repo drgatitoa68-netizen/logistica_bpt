@@ -38,6 +38,22 @@ export default async function DashboardPage() {
       color: "#7c3aed",
       border: "rgba(124,58,237,0.35)",
     },
+    {
+      href: "/ubicacion-produccion",
+      icon: "🗺",
+      label: "UBICACIÓN PRODUCCIÓN",
+      desc: "Planifica dónde ubicar cada producto del subinventario PRODUCCION",
+      color: "#d97706",
+      border: "rgba(217,119,6,0.35)",
+    },
+    {
+      href: "/configuracion",
+      icon: "⚙",
+      label: "CONFIGURACIÓN",
+      desc: "Gestiona capacidades, formatos y bloqueo de ubicaciones",
+      color: "#0891b2",
+      border: "rgba(8,145,178,0.35)",
+    },
   ];
 
   return (

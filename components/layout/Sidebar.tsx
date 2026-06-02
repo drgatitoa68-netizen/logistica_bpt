@@ -10,6 +10,8 @@ const NAV = [
   { href: "/subir-archivo",        icon: "📂", label: "SUBIR ARCHIVO" },
   { href: "/ordenes-produccion",   icon: "📋", label: "ÓRDENES" },
   { href: "/operador",             icon: "👷", label: "OPERADOR" },
+  { href: "/ubicacion-produccion",  icon: "🗺", label: "UBICACIÓN" },
+  { href: "/configuracion",        icon: "⚙", label: "CONFIGURACIÓN" },
 ];
 
 export default function Sidebar({ email }: { email: string }) {
