@@ -10,6 +10,39 @@ function revalidate() {
   revalidatePath("/operador");
 }
 
+export async function aprobarLineaDirecta(id: string, responsable?: string) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: "No autenticado" };
+
+  const update: Record<string, unknown> = {
+    estado: "aprobada",
+    supervisor_email: user.email,
+    updated_at: new Date().toISOString(),
+  };
+  if (responsable) update.responsable = responsable;
+
+  const { error } = await supabase.from(TABLE).update(update).eq("id", id);
+  if (error) return { error: error.message };
+  revalidate();
+  return { ok: true };
+}
+
+export async function actualizarResponsable(id: string, responsable: string) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: "No autenticado" };
+
+  const { error } = await supabase.from(TABLE).update({
+    responsable,
+    updated_at: new Date().toISOString(),
+  }).eq("id", id);
+
+  if (error) return { error: error.message };
+  revalidate();
+  return { ok: true };
+}
+
 export async function aprobarLinea(id: string, notas: string) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();

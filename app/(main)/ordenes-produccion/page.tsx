@@ -3,7 +3,10 @@
 import { useEffect, useState, useCallback } from "react";
 import { getBrowserClient } from "@/lib/supabase/browser";
 import { Linea, ESTADO_COLOR, viajesPorLinea } from "@/lib/shared/ordenes";
-import { aprobarLinea, rechazarLinea, fraccionarLinea, crearLinea } from "@/app/actions/ordenes";
+import {
+  aprobarLinea, rechazarLinea, fraccionarLinea, crearLinea,
+  aprobarLineaDirecta, actualizarResponsable,
+} from "@/app/actions/ordenes";
 
 const db = getBrowserClient();
 
@@ -31,7 +34,14 @@ export default function OrdenesPage() {
   const [flash, setFlash] = useState("");
   const [nueva, setNueva] = useState(emptyNueva);
 
-  // Estado para fraccionar
+  // Inline responsable editing
+  const [editResp, setEditResp] = useState<{ id: string; value: string } | null>(null);
+  const [savingResp, setSavingResp] = useState<string | null>(null);
+
+  // Quick direct approval
+  const [quickSaving, setQuickSaving] = useState<string | null>(null);
+
+  // Fraccionar state
   const [frac1, setFrac1] = useState({ pallets: 0, cajas: 0, cantidad_fisica: 0, localizador_destino: "", subinventario_destino: "" });
   const [frac2, setFrac2] = useState({ pallets: 0, cajas: 0, cantidad_fisica: 0, localizador_destino: "", subinventario_destino: "" });
 
@@ -49,6 +59,27 @@ export default function OrdenesPage() {
 
   const showFlash = (msg: string) => { setFlash(msg); setTimeout(() => setFlash(""), 3500); };
 
+  // ── Quick approve (no modal) ──────────────────────────────────────────────
+  async function handleAprobarDirecta(linea: Linea) {
+    setQuickSaving(linea.id);
+    const res = await aprobarLineaDirecta(linea.id, linea.responsable || undefined);
+    setQuickSaving(null);
+    if (res?.error) { showFlash("❌ " + res.error); return; }
+    showFlash(`✓ Línea aprobada → visible para ${linea.responsable || "el operador"}`);
+    load();
+  }
+
+  // ── Inline responsable save ───────────────────────────────────────────────
+  async function saveResp(id: string, value: string) {
+    setSavingResp(id);
+    const res = await actualizarResponsable(id, value.trim());
+    setSavingResp(null);
+    setEditResp(null);
+    if (res?.error) showFlash("❌ " + res.error);
+    else { showFlash("✓ Responsable actualizado"); load(); }
+  }
+
+  // ── Modal actions ─────────────────────────────────────────────────────────
   async function handleAprobar() {
     if (!modal || modal.type !== "aprobar") return;
     setSaving(true);
@@ -56,7 +87,7 @@ export default function OrdenesPage() {
     setSaving(false);
     if (res?.error) { showFlash("❌ " + res.error); return; }
     setModal(null); setNotas("");
-    showFlash("✓ Línea aprobada — visible para el operador");
+    showFlash("✓ Línea aprobada con notas — visible para el operador");
     load();
   }
 
@@ -74,7 +105,7 @@ export default function OrdenesPage() {
   async function handleFraccionar() {
     if (!modal || modal.type !== "fraccionar") return;
     if (frac1.pallets + frac2.pallets !== modal.linea.pallets) {
-      showFlash(`⚠ Los pallets de las fracciones (${frac1.pallets}+${frac2.pallets}) deben sumar ${modal.linea.pallets}`);
+      showFlash(`⚠ Los pallets (${frac1.pallets}+${frac2.pallets}) deben sumar ${modal.linea.pallets}`);
       return;
     }
     setSaving(true);
@@ -82,7 +113,7 @@ export default function OrdenesPage() {
     setSaving(false);
     if (res?.error) { showFlash("❌ " + res.error); return; }
     setModal(null);
-    showFlash("✓ Línea fraccionada en 2 — ambas están aprobadas para el operador");
+    showFlash("✓ Línea fraccionada — ambas fracciones aprobadas para el operador");
     load();
   }
 
@@ -102,32 +133,31 @@ export default function OrdenesPage() {
 
   function openFraccionar(linea: Linea) {
     const halfPallets = Math.floor(linea.pallets / 2);
-    const halfCajas = Math.floor(linea.cajas / 2);
-    const halfCant = linea.cantidad_fisica / 2;
+    const halfCajas   = Math.floor(linea.cajas / 2);
+    const halfCant    = linea.cantidad_fisica / 2;
     setFrac1({ pallets: halfPallets, cajas: halfCajas, cantidad_fisica: Math.round(halfCant * 100) / 100, localizador_destino: linea.localizador_destino || "", subinventario_destino: linea.subinventario_destino || "" });
     setFrac2({ pallets: linea.pallets - halfPallets, cajas: linea.cajas - halfCajas, cantidad_fisica: Math.round((linea.cantidad_fisica - halfCant) * 100) / 100, localizador_destino: linea.localizador_destino || "", subinventario_destino: linea.subinventario_destino || "" });
     setModal({ type: "fraccionar", linea });
   }
 
   function autoFrac2(linea: Linea, f1: typeof frac1) {
-    const f2 = {
-      pallets: Math.max(0, linea.pallets - f1.pallets),
-      cajas: Math.max(0, linea.cajas - f1.cajas),
-      cantidad_fisica: Math.max(0, Math.round((linea.cantidad_fisica - f1.cantidad_fisica) * 100) / 100),
-      localizador_destino: frac2.localizador_destino,
+    setFrac2({
+      pallets:           Math.max(0, linea.pallets - f1.pallets),
+      cajas:             Math.max(0, linea.cajas - f1.cajas),
+      cantidad_fisica:   Math.max(0, Math.round((linea.cantidad_fisica - f1.cantidad_fisica) * 100) / 100),
+      localizador_destino:   frac2.localizador_destino,
       subinventario_destino: frac2.subinventario_destino,
-    };
-    setFrac2(f2);
+    });
   }
 
   const filtradas = filtroEstado === "todos" ? lineas : lineas.filter(l => l.estado === filtroEstado);
 
   const stats = {
-    total: lineas.length,
+    total:      lineas.length,
     pendientes: lineas.filter(l => l.estado === "pendiente").length,
-    aprobadas: lineas.filter(l => l.estado === "aprobada").length,
-    enProceso: lineas.filter(l => l.estado === "en_proceso").length,
-    completadas: lineas.filter(l => l.estado === "completada").length,
+    aprobadas:  lineas.filter(l => l.estado === "aprobada").length,
+    enProceso:  lineas.filter(l => l.estado === "en_proceso").length,
+    completadas:lineas.filter(l => l.estado === "completada").length,
   };
 
   return (
@@ -139,7 +169,7 @@ export default function OrdenesPage() {
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 12 }}>
           <div>
             <h1 style={s.title}>Órdenes de Reubicación</h1>
-            <p style={s.sub}>Supervisor: revisa, aprueba o fracciona cada línea antes de enviar al operador</p>
+            <p style={s.sub}>Supervisor: edita el responsable, aprueba o fracciona cada línea</p>
           </div>
           <button style={s.btnPrimary} onClick={() => setModal({ type: "nueva" })}>+ NUEVA LÍNEA</button>
         </div>
@@ -148,11 +178,11 @@ export default function OrdenesPage() {
       {/* Stats */}
       <div style={s.statsRow}>
         {[
-          { label: "TOTAL", val: stats.total, color: "#e2e8f0" },
-          { label: "PENDIENTES", val: stats.pendientes, color: "#fbbf24" },
-          { label: "APROBADAS", val: stats.aprobadas, color: "#4ade80" },
-          { label: "EN PROCESO", val: stats.enProceso, color: "#60a5fa" },
-          { label: "COMPLETADAS", val: stats.completadas, color: "#a78bfa" },
+          { label: "TOTAL",      val: stats.total,       color: "#e2e8f0" },
+          { label: "PENDIENTES", val: stats.pendientes,  color: "#fbbf24" },
+          { label: "APROBADAS",  val: stats.aprobadas,   color: "#4ade80" },
+          { label: "EN PROCESO", val: stats.enProceso,   color: "#60a5fa" },
+          { label: "COMPLETADAS",val: stats.completadas, color: "#a78bfa" },
         ].map(st => (
           <div key={st.label} style={s.statCard}>
             <div style={{ fontSize: 22, fontWeight: 700, color: st.color }}>{st.val}</div>
@@ -165,7 +195,7 @@ export default function OrdenesPage() {
       <div style={s.filters}>
         {["todos", "pendiente", "aprobada", "rechazada", "en_proceso", "completada"].map(f => (
           <button key={f} onClick={() => setFiltroEstado(f)}
-            style={{ ...s.filterBtn, background: filtroEstado === f ? "#f97316" : "transparent", color: filtroEstado === f ? "#000" : "#6b7280" }}>
+            style={{ ...s.filterBtn, background: filtroEstado === f ? "#f97316" : "transparent", color: filtroEstado === f ? "#000" : "#9ca3af" }}>
             {f === "todos" ? "TODOS" : (ESTADO_COLOR[f as keyof typeof ESTADO_COLOR]?.label ?? f.toUpperCase())}
           </button>
         ))}
@@ -176,55 +206,106 @@ export default function OrdenesPage() {
       {loading ? (
         <div style={s.loading}>Cargando líneas…</div>
       ) : filtradas.length === 0 ? (
-        <div style={s.empty}>No hay líneas{filtroEstado !== "todos" ? ` "${filtroEstado}"` : ""}</div>
+        <div style={s.empty}>No hay líneas{filtroEstado !== "todos" ? ` con estado "${filtroEstado}"` : ""}</div>
       ) : (
         <div style={s.tableWrap}>
           <table style={s.table}>
             <thead>
               <tr style={s.thead}>
-                {["ORD", "COD. ORG", "CÓDIGO", "DESCRIPCIÓN", "SI ORIGEN", "LOC ORIGEN", "LOTE", "CANT. FÍS.", "PLT", "CAJAS", "SI DESTINO", "LOC DESTINO", "RESP.", "INV-PE", "CONTEO", "VIAJES", "ESTADO", "ACCIONES"].map(h => (
+                {["ORD", "COD. ORG", "CÓDIGO", "DESCRIPCIÓN", "SI ORIGEN", "LOC ORIGEN", "LOTE", "CANT. FÍS.", "PLT", "CAJAS", "SI DESTINO", "LOC DESTINO", "RESPONSABLE ✎", "INV-PE", "CONTEO", "VIAJES", "ESTADO", "ACCIONES"].map(h => (
                   <th key={h} style={s.th}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtradas.map((l, i) => {
-                const est = ESTADO_COLOR[l.estado] ?? ESTADO_COLOR.pendiente;
+                const est    = ESTADO_COLOR[l.estado] ?? ESTADO_COLOR.pendiente;
                 const viajes = viajesPorLinea(l.pallets || 0);
+                const isEditingResp = editResp?.id === l.id;
+
                 return (
-                  <tr key={l.id} style={{ ...s.tr, background: l.es_fraccion ? "rgba(37,99,235,0.04)" : (i % 2 === 0 ? "transparent" : "#0d1117") }}>
+                  <tr key={l.id} style={{ ...s.tr, background: l.es_fraccion ? "rgba(37,99,235,0.05)" : (i % 2 === 0 ? "transparent" : "#0d1117") }}>
+
                     <td style={s.td}><span style={s.ordenNum}>{l.numero_orden || "—"}{l.es_fraccion && <span style={s.fracTag}>⌥</span>}</span></td>
-                    <td style={{ ...s.td, color: "#6b7280" }}>{l.cod_org_inv || "—"}</td>
+                    <td style={{ ...s.td, color: "#9ca3af" }}>{l.cod_org_inv || "—"}</td>
                     <td style={{ ...s.td, color: "#f97316", fontWeight: 600 }}>{l.codigo || "—"}</td>
                     <td style={{ ...s.td, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{l.descripcion}</td>
-                    <td style={{ ...s.td, color: "#6b7280", fontSize: 10 }}>{l.subinventario_origen || "—"}</td>
+                    <td style={{ ...s.td, color: "#9ca3af", fontSize: 10 }}>{l.subinventario_origen || "—"}</td>
                     <td style={{ ...s.td, color: "#e2e8f0", fontFamily: "monospace" }}>{l.localizador_origen || "—"}</td>
-                    <td style={{ ...s.td, color: "#6b7280", fontFamily: "monospace", fontSize: 11 }}>{l.lote || "—"}</td>
-                    <td style={{ ...s.td, textAlign: "right" as const }}>{l.cantidad_fisica?.toFixed(2) || "0.00"}</td>
+                    <td style={{ ...s.td, color: "#9ca3af", fontFamily: "monospace", fontSize: 11 }}>{l.lote || "—"}</td>
+                    <td style={{ ...s.td, textAlign: "right" as const, color: "#d1d5db" }}>{l.cantidad_fisica?.toFixed(2) || "0.00"}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, fontWeight: 700, color: "#fbbf24" }}>{l.pallets}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, color: "#9ca3af" }}>{l.cajas}</td>
-                    <td style={{ ...s.td, color: "#6b7280", fontSize: 10 }}>{l.subinventario_destino || "—"}</td>
+                    <td style={{ ...s.td, color: "#9ca3af", fontSize: 10 }}>{l.subinventario_destino || "—"}</td>
                     <td style={{ ...s.td, color: "#60a5fa", fontFamily: "monospace" }}>{l.localizador_destino || "—"}</td>
-                    <td style={{ ...s.td, color: "#6b7280", fontSize: 11 }}>{l.responsable || "—"}</td>
-                    <td style={{ ...s.td, textAlign: "right" as const, color: "#6b7280" }}>{l.inv_pe ?? "—"}</td>
-                    <td style={{ ...s.td, textAlign: "right" as const, color: "#374151" }}>{l.conteo ?? "—"}</td>
+
+                    {/* RESPONSABLE — editable inline */}
+                    <td style={{ ...s.td, minWidth: 120 }}>
+                      {isEditingResp ? (
+                        <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                          <input
+                            autoFocus
+                            style={s.respInput}
+                            value={editResp.value}
+                            onChange={e => setEditResp({ id: l.id, value: e.target.value })}
+                            onKeyDown={e => {
+                              if (e.key === "Enter") saveResp(l.id, editResp.value);
+                              if (e.key === "Escape") setEditResp(null);
+                            }}
+                          />
+                          <button style={s.btnSaveSmall} onClick={() => saveResp(l.id, editResp.value)} disabled={savingResp === l.id}>✓</button>
+                          <button style={s.btnCancelSmall} onClick={() => setEditResp(null)}>✗</button>
+                        </div>
+                      ) : (
+                        <span
+                          style={{ color: l.responsable ? "#e2e8f0" : "#6b7280", cursor: "pointer", borderBottom: "1px dashed rgba(249,115,22,0.35)", paddingBottom: 1, fontSize: 11 }}
+                          onClick={() => setEditResp({ id: l.id, value: l.responsable || "" })}
+                          title="Clic para editar"
+                        >
+                          {l.responsable || "— asignar"}
+                        </span>
+                      )}
+                    </td>
+
+                    <td style={{ ...s.td, textAlign: "right" as const, color: "#d1d5db" }}>{l.inv_pe ?? "—"}</td>
+                    <td style={{ ...s.td, textAlign: "right" as const, color: "#9ca3af" }}>{l.conteo ?? "—"}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, color: "#4ade80", fontWeight: 700 }}>{viajes}</td>
                     <td style={s.td}>
                       <span style={{ ...s.badge2, background: est.bg, color: est.color }}>{est.label}</span>
                     </td>
-                    <td style={s.td}>
+
+                    {/* ACCIONES */}
+                    <td style={{ ...s.td, minWidth: 200 }}>
                       {l.estado === "pendiente" && (
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <button style={s.btnAprobar} onClick={() => { setModal({ type: "aprobar", linea: l }); setNotas(""); }}>✓</button>
-                          <button style={s.btnRechazar} onClick={() => { setModal({ type: "rechazar", linea: l }); setNotas(""); }}>✗</button>
+                        <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" as const }}>
+                          {/* Botón principal: APROBAR LÍNEA */}
+                          <button
+                            style={{ ...s.btnAprobarDirect, opacity: quickSaving === l.id ? 0.6 : 1 }}
+                            disabled={quickSaving === l.id}
+                            onClick={() => handleAprobarDirecta(l)}
+                            title={`Aprobar y asignar a ${l.responsable || "operador"}`}
+                          >
+                            {quickSaving === l.id ? "…" : "✓ APROBAR LÍNEA"}
+                          </button>
+                          {/* Aprobar con notas */}
+                          <button style={s.btnAprobar} onClick={() => { setModal({ type: "aprobar", linea: l }); setNotas(""); }} title="Aprobar con notas">📝</button>
+                          {/* Rechazar */}
+                          <button style={s.btnRechazar} onClick={() => { setModal({ type: "rechazar", linea: l }); setNotas(""); }} title="Rechazar">✗</button>
+                          {/* Fraccionar */}
                           <button style={s.btnFraccionar} onClick={() => openFraccionar(l)} title="Fraccionar línea">⌥</button>
                         </div>
                       )}
                       {l.estado === "aprobada" && (
-                        <button style={s.btnFraccionar} onClick={() => openFraccionar(l)} title="Fraccionar">⌥ Frac.</button>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <span style={{ fontSize: 10, color: "#4ade80" }}>→ {l.responsable || "operador"}</span>
+                          <button style={s.btnFraccionar} onClick={() => openFraccionar(l)} title="Fraccionar">⌥</button>
+                        </div>
+                      )}
+                      {l.estado === "en_proceso" && l.responsable && (
+                        <span style={{ fontSize: 10, color: "#60a5fa" }}>⚙ {l.responsable}</span>
                       )}
                       {l.duracion_minutos != null && (
-                        <span style={{ fontSize: 10, color: "#a78bfa" }}>{l.duracion_minutos.toFixed(1)} min</span>
+                        <span style={{ fontSize: 10, color: "#a78bfa", display: "block", marginTop: 2 }}>{l.duracion_minutos.toFixed(1)} min</span>
                       )}
                     </td>
                   </tr>
@@ -235,23 +316,24 @@ export default function OrdenesPage() {
         </div>
       )}
 
-      {/* Modal Aprobar / Rechazar */}
+      {/* Modal Aprobar con notas / Rechazar */}
       {modal && (modal.type === "aprobar" || modal.type === "rechazar") && (
         <div style={s.overlay} onClick={() => setModal(null)}>
           <div style={s.modalBox} onClick={e => e.stopPropagation()}>
             <div style={{ ...s.modalTitle, color: modal.type === "aprobar" ? "#4ade80" : "#f87171" }}>
-              {modal.type === "aprobar" ? "✓ APROBAR LÍNEA" : "✗ RECHAZAR LÍNEA"}
+              {modal.type === "aprobar" ? "✓ APROBAR CON NOTAS" : "✗ RECHAZAR LÍNEA"}
             </div>
             <div style={s.modalInfo}>
               <div style={{ fontWeight: 700, color: "#f97316" }}>{modal.linea.numero_orden || "Sin número"}</div>
-              <div>{modal.linea.descripcion}</div>
-              <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 11, color: "#6b7280" }}>
+              <div style={{ color: "#e2e8f0" }}>{modal.linea.descripcion}</div>
+              <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 11, color: "#9ca3af" }}>
                 <span>🔢 {modal.linea.pallets} plt · {modal.linea.cajas} cajas</span>
                 <span>→ {modal.linea.localizador_destino || "Sin destino"}</span>
                 <span>🚌 {viajesPorLinea(modal.linea.pallets || 0)} viajes</span>
+                {modal.linea.responsable && <span>👷 {modal.linea.responsable}</span>}
               </div>
             </div>
-            <label style={s.fieldLabel}>Notas del supervisor (opcional)</label>
+            <label style={s.fieldLabel}>{modal.type === "aprobar" ? "Instrucciones para el operador" : "Motivo del rechazo"}</label>
             <textarea value={notas} onChange={e => setNotas(e.target.value)}
               placeholder={modal.type === "aprobar" ? "Instrucciones para el operador…" : "Motivo del rechazo…"}
               style={s.textarea} rows={3} />
@@ -272,12 +354,10 @@ export default function OrdenesPage() {
           <div style={{ ...s.modalBox, maxWidth: 620 }} onClick={e => e.stopPropagation()}>
             <div style={{ ...s.modalTitle, color: "#fbbf24" }}>⌥ FRACCIONAR LÍNEA</div>
             <div style={s.modalInfo}>
-              <div>{modal.linea.descripcion} — <b>{modal.linea.pallets} plt total · {modal.linea.cajas} cajas · {modal.linea.cantidad_fisica} cant. física</b></div>
-              <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4 }}>Divide la línea cuando la ubicación destino no tiene suficiente capacidad. Los pallets de ambas fracciones deben sumar {modal.linea.pallets}.</div>
+              <div style={{ color: "#e2e8f0" }}>{modal.linea.descripcion} — <b>{modal.linea.pallets} plt · {modal.linea.cajas} cajas</b></div>
+              <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>Los pallets de ambas fracciones deben sumar {modal.linea.pallets}.</div>
             </div>
-
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
-              {/* Fracción 1 */}
               <div style={s.fracBox}>
                 <div style={s.fracTitle}>FRACCIÓN 1</div>
                 {[
@@ -295,14 +375,11 @@ export default function OrdenesPage() {
                         const val = f.type === "number" ? Number(e.target.value) : e.target.value;
                         const updated = { ...frac1, [f.key]: val };
                         setFrac1(updated);
-                        if (["pallets", "cajas", "cantidad_fisica"].includes(f.key)) {
-                          autoFrac2(modal.linea, updated);
-                        }
+                        if (["pallets", "cajas", "cantidad_fisica"].includes(f.key)) autoFrac2(modal.linea, updated);
                       }} />
                   </div>
                 ))}
               </div>
-              {/* Fracción 2 */}
               <div style={s.fracBox}>
                 <div style={{ ...s.fracTitle, color: "#60a5fa" }}>FRACCIÓN 2 (auto)</div>
                 {[
@@ -314,7 +391,7 @@ export default function OrdenesPage() {
                 ].map(f => (
                   <div key={f.key} style={{ marginBottom: 8 }}>
                     <label style={s.fieldLabel}>{f.label}</label>
-                    <input style={{ ...s.fieldInput, background: f.ro ? "#080c14" : undefined }}
+                    <input style={{ ...s.fieldInput, background: f.ro ? "#080c14" : undefined, color: f.ro ? "#9ca3af" : "#e2e8f0" }}
                       type={["pallets", "cajas", "cantidad_fisica"].includes(f.key) ? "number" : "text"}
                       readOnly={f.ro}
                       value={String(frac2[f.key as keyof typeof frac2])}
@@ -323,14 +400,11 @@ export default function OrdenesPage() {
                 ))}
               </div>
             </div>
-
-            {/* Validación visual */}
             <div style={{ fontSize: 11, marginBottom: 12, padding: "8px 12px", borderRadius: 3, background: frac1.pallets + frac2.pallets === modal.linea.pallets ? "#0f2a0f" : "#2a0f0f", color: frac1.pallets + frac2.pallets === modal.linea.pallets ? "#4ade80" : "#f87171" }}>
               {frac1.pallets + frac2.pallets === modal.linea.pallets
                 ? `✓ Pallets cuadran: ${frac1.pallets} + ${frac2.pallets} = ${modal.linea.pallets}`
                 : `⚠ Pallets no cuadran: ${frac1.pallets} + ${frac2.pallets} ≠ ${modal.linea.pallets}`}
             </div>
-
             <div style={{ display: "flex", gap: 10 }}>
               <button style={{ ...s.modalBtn, background: "#92400e", color: "#fff", opacity: saving ? 0.6 : 1 }} onClick={handleFraccionar} disabled={saving}>
                 {saving ? "Fraccionando…" : "CONFIRMAR FRACCIÓN"}
@@ -353,7 +427,7 @@ export default function OrdenesPage() {
                 { k: "codigo", l: "CÓDIGO", ph: "231421E" },
                 { k: "descripcion", l: "DESCRIPCIÓN *", ph: "GALIA 23.3X41..." },
                 { k: "lote", l: "LOTE", ph: "T570A" },
-                { k: "responsable", l: "RESPONSABLE", ph: "MARCO_MEJIA" },
+                { k: "responsable", l: "RESPONSABLE", ph: "CVIVAR_1" },
                 { k: "subinventario_origen", l: "SI ORIGEN", ph: "ZONA09" },
                 { k: "localizador_origen", l: "LOC. ORIGEN", ph: "09.21.00.00" },
                 { k: "subinventario_destino", l: "SI DESTINO", ph: "ZONA15" },
@@ -391,42 +465,48 @@ export default function OrdenesPage() {
 }
 
 const s: { [k: string]: React.CSSProperties } = {
-  root: { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#e2e8f0", minHeight: "100vh", background: "#0a0e17", position: "relative" },
-  flash: { position: "fixed", top: 20, right: 24, background: "#0d1117", border: "1px solid rgba(249,115,22,0.4)", color: "#f97316", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
-  pageHeader: { marginBottom: 20 },
-  badge: { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", marginBottom: 10 },
-  title: { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#fff", letterSpacing: 1 },
-  sub: { margin: 0, fontSize: 11, color: "#4a5568" },
-  btnPrimary: { background: "#f97316", border: "none", color: "#000", fontSize: 10, fontWeight: 700, letterSpacing: 2, padding: "9px 18px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  statsRow: { display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" as const },
-  statCard: { background: "#0d1117", border: "1px solid rgba(249,115,22,0.1)", borderRadius: 3, padding: "10px 18px", flex: 1, minWidth: 90 },
-  statLabel: { fontSize: 9, letterSpacing: 2, color: "#374151", marginTop: 3 },
-  filters: { display: "flex", gap: 5, marginBottom: 14, flexWrap: "wrap" as const, alignItems: "center" },
-  filterBtn: { border: "1px solid rgba(249,115,22,0.2)", fontSize: 9, letterSpacing: 1.5, padding: "5px 10px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", fontWeight: 600 },
-  refreshBtn: { background: "transparent", border: "1px solid rgba(249,115,22,0.12)", color: "#4a5568", fontSize: 13, padding: "5px 10px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  loading: { textAlign: "center" as const, color: "#4a5568", padding: 40, fontSize: 12 },
-  empty: { textAlign: "center" as const, color: "#374151", padding: 40, fontSize: 12, border: "1px dashed rgba(249,115,22,0.1)", borderRadius: 3 },
-  tableWrap: { overflowX: "auto" as const, border: "1px solid rgba(249,115,22,0.1)", borderRadius: 3 },
-  table: { width: "100%", borderCollapse: "collapse" as const, fontSize: 11 },
-  thead: { borderBottom: "1px solid rgba(249,115,22,0.15)", background: "#080c14" },
-  th: { padding: "7px 10px", textAlign: "left" as const, fontSize: 9, letterSpacing: 1.5, color: "#374151", fontWeight: 700, whiteSpace: "nowrap" as const },
-  tr: { borderBottom: "1px solid rgba(249,115,22,0.04)" },
-  td: { padding: "7px 10px", verticalAlign: "middle" as const, whiteSpace: "nowrap" as const },
-  ordenNum: { color: "#f97316", fontWeight: 700, letterSpacing: 0.5, position: "relative" as const },
-  fracTag: { fontSize: 9, color: "#60a5fa", marginLeft: 4 },
-  badge2: { display: "inline-block", fontSize: 9, letterSpacing: 1, fontWeight: 700, padding: "2px 8px", borderRadius: 2 },
-  btnAprobar: { background: "transparent", border: "1px solid rgba(34,197,94,0.3)", color: "#4ade80", fontSize: 10, padding: "4px 8px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  btnRechazar: { background: "transparent", border: "1px solid rgba(248,113,113,0.3)", color: "#f87171", fontSize: 10, padding: "4px 8px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  btnFraccionar: { background: "transparent", border: "1px solid rgba(251,191,36,0.3)", color: "#fbbf24", fontSize: 10, padding: "4px 8px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, overflowY: "auto" as const },
-  modalBox: { background: "#0d1117", border: "1px solid rgba(249,115,22,0.3)", borderRadius: 4, padding: "24px 28px", width: "100%", maxWidth: 460 },
-  modalTitle: { fontSize: 13, fontWeight: 700, letterSpacing: 2, marginBottom: 14 },
-  modalInfo: { fontSize: 12, color: "#e2e8f0", marginBottom: 14, padding: "10px 14px", background: "#0a0e17", borderRadius: 3 },
-  fieldLabel: { fontSize: 9, letterSpacing: 2, color: "#f97316", display: "block" as const, marginBottom: 5, fontWeight: 600 },
-  textarea: { width: "100%", background: "#0a0e17", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "8px 10px", fontFamily: "'Courier New', monospace", resize: "vertical" as const, boxSizing: "border-box" as const, outline: "none" },
-  modalBtn: { border: "none", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "10px 16px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  modalBtnCancel: { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#6b7280", fontSize: 10, letterSpacing: 1, padding: "10px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  fieldInput: { background: "#0a0e17", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "7px 9px", fontFamily: "'Courier New', monospace", width: "100%", boxSizing: "border-box" as const, outline: "none" },
-  fracBox: { background: "#080c14", border: "1px solid rgba(249,115,22,0.12)", borderRadius: 3, padding: "14px" },
-  fracTitle: { fontSize: 9, letterSpacing: 2, color: "#fbbf24", fontWeight: 700, marginBottom: 12 },
+  root:             { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#e2e8f0", minHeight: "100vh", background: "#0a0e17", position: "relative" },
+  flash:            { position: "fixed", top: 20, right: 24, background: "#111827", border: "1px solid rgba(249,115,22,0.5)", color: "#f97316", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
+  pageHeader:       { marginBottom: 20 },
+  badge:            { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", marginBottom: 10 },
+  title:            { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#fff", letterSpacing: 1 },
+  sub:              { margin: 0, fontSize: 11, color: "#9ca3af" },
+  btnPrimary:       { background: "#f97316", border: "none", color: "#000", fontSize: 10, fontWeight: 700, letterSpacing: 2, padding: "9px 18px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
+  statsRow:         { display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" as const },
+  statCard:         { background: "#111827", border: "1px solid rgba(249,115,22,0.15)", borderRadius: 3, padding: "10px 18px", flex: 1, minWidth: 90 },
+  statLabel:        { fontSize: 9, letterSpacing: 2, color: "#9ca3af", marginTop: 3 },
+  filters:          { display: "flex", gap: 5, marginBottom: 14, flexWrap: "wrap" as const, alignItems: "center" },
+  filterBtn:        { border: "1px solid rgba(249,115,22,0.25)", fontSize: 9, letterSpacing: 1.5, padding: "5px 10px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", fontWeight: 600 },
+  refreshBtn:       { background: "transparent", border: "1px solid rgba(249,115,22,0.15)", color: "#9ca3af", fontSize: 13, padding: "5px 10px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
+  loading:          { textAlign: "center" as const, color: "#9ca3af", padding: 40, fontSize: 12 },
+  empty:            { textAlign: "center" as const, color: "#6b7280", padding: 40, fontSize: 12, border: "1px dashed rgba(249,115,22,0.12)", borderRadius: 3 },
+  tableWrap:        { overflowX: "auto" as const, border: "1px solid rgba(249,115,22,0.12)", borderRadius: 3 },
+  table:            { width: "100%", borderCollapse: "collapse" as const, fontSize: 11 },
+  thead:            { borderBottom: "1px solid rgba(249,115,22,0.2)", background: "#0d1117" },
+  th:               { padding: "8px 10px", textAlign: "left" as const, fontSize: 9, letterSpacing: 1.5, color: "#9ca3af", fontWeight: 700, whiteSpace: "nowrap" as const },
+  tr:               { borderBottom: "1px solid rgba(249,115,22,0.06)" },
+  td:               { padding: "7px 10px", verticalAlign: "middle" as const, whiteSpace: "nowrap" as const },
+  ordenNum:         { color: "#f97316", fontWeight: 700, letterSpacing: 0.5, position: "relative" as const },
+  fracTag:          { fontSize: 9, color: "#60a5fa", marginLeft: 4 },
+  badge2:           { display: "inline-block", fontSize: 9, letterSpacing: 1, fontWeight: 700, padding: "2px 8px", borderRadius: 2 },
+  // Inline responsable editing
+  respInput:        { background: "#111827", border: "1px solid rgba(249,115,22,0.4)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "3px 6px", fontFamily: "'Courier New', monospace", width: 100, outline: "none" },
+  btnSaveSmall:     { background: "transparent", border: "1px solid rgba(74,222,128,0.4)", color: "#4ade80", fontSize: 11, padding: "2px 6px", cursor: "pointer", borderRadius: 2 },
+  btnCancelSmall:   { background: "transparent", border: "1px solid rgba(248,113,113,0.3)", color: "#f87171", fontSize: 11, padding: "2px 6px", cursor: "pointer", borderRadius: 2 },
+  // Action buttons
+  btnAprobarDirect: { background: "#166534", border: "1px solid #16a34a", color: "#4ade80", fontSize: 10, fontWeight: 700, letterSpacing: 1, padding: "5px 10px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", whiteSpace: "nowrap" as const },
+  btnAprobar:       { background: "transparent", border: "1px solid rgba(74,222,128,0.35)", color: "#4ade80", fontSize: 11, padding: "4px 7px", cursor: "pointer", borderRadius: 2 },
+  btnRechazar:      { background: "transparent", border: "1px solid rgba(248,113,113,0.35)", color: "#f87171", fontSize: 10, padding: "4px 7px", cursor: "pointer", borderRadius: 2 },
+  btnFraccionar:    { background: "transparent", border: "1px solid rgba(251,191,36,0.35)", color: "#fbbf24", fontSize: 10, padding: "4px 7px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
+  overlay:          { position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, overflowY: "auto" as const },
+  modalBox:         { background: "#111827", border: "1px solid rgba(249,115,22,0.35)", borderRadius: 4, padding: "24px 28px", width: "100%", maxWidth: 460 },
+  modalTitle:       { fontSize: 13, fontWeight: 700, letterSpacing: 2, marginBottom: 14, color: "#f97316" },
+  modalInfo:        { fontSize: 12, marginBottom: 14, padding: "10px 14px", background: "#0d1117", borderRadius: 3, border: "1px solid rgba(249,115,22,0.1)" },
+  fieldLabel:       { fontSize: 9, letterSpacing: 2, color: "#f97316", display: "block" as const, marginBottom: 5, fontWeight: 600 },
+  textarea:         { width: "100%", background: "#0d1117", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "8px 10px", fontFamily: "'Courier New', monospace", resize: "vertical" as const, boxSizing: "border-box" as const, outline: "none" },
+  modalBtn:         { border: "none", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "10px 16px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
+  modalBtnCancel:   { background: "transparent", border: "1px solid rgba(249,115,22,0.25)", color: "#9ca3af", fontSize: 10, letterSpacing: 1, padding: "10px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
+  fieldInput:       { background: "#0d1117", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 2, color: "#e2e8f0", fontSize: 11, padding: "7px 9px", fontFamily: "'Courier New', monospace", width: "100%", boxSizing: "border-box" as const, outline: "none" },
+  fracBox:          { background: "#0d1117", border: "1px solid rgba(249,115,22,0.15)", borderRadius: 3, padding: "14px" },
+  fracTitle:        { fontSize: 9, letterSpacing: 2, color: "#fbbf24", fontWeight: 700, marginBottom: 12 },
 };
