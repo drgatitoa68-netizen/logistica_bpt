@@ -10,7 +10,7 @@ const db = getBrowserClient();
 
 type Filtro = "pendiente" | "aprobada" | "rechazada" | "todas";
 
-interface Operador { id: string; nombre: string; cedula?: string; email?: string; }
+interface Operador { id: string; nombre: string; email?: string; rol?: string; }
 
 interface FraccionForm {
   lineaId:  string;
@@ -61,7 +61,7 @@ export default function OrdenesProduccionPage() {
 
   useEffect(() => {
     load();
-    db.from("operadores").select("id,nombre,cedula,email").eq("activo", true).order("nombre")
+    db.from("operadores_bodega").select("id,nombre,email,rol").eq("activo", true).order("nombre")
       .then(({ data }) => setOperadores((data as Operador[]) ?? []));
 
     const dl = debounce(load, 600);
@@ -417,7 +417,7 @@ function LineaCard({
                     <button key={op.id} style={{ ...s.opItem, background: l.responsable === op.nombre ? "rgba(74,222,128,0.08)" : "transparent", color: l.responsable === op.nombre ? "#4ade80" : "#1e293b" }}
                       onClick={() => { onAsignarOp(l.id, op.nombre); setOpOpen(false); }}>
                       {l.responsable === op.nombre && "✓ "}{op.nombre}
-                      {op.cedula && <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: 6 }}>· {op.cedula}</span>}
+                      {op.rol && <span style={{ fontSize: 9, color: "#94a3b8", marginLeft: 6, background: "#f1f5f9", padding: "1px 5px", borderRadius: 2 }}>{op.rol}</span>}
                     </button>
                   ))
                 )}

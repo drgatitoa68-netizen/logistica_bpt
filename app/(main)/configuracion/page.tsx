@@ -63,12 +63,12 @@ export default function ConfiguracionPage() {
   const catalogRef = useRef<HTMLInputElement>(null);
 
   // Operadores
-  interface Operador { id: string; nombre: string; cedula: string; email: string; activo: boolean; }
+  interface Operador { id: string; nombre: string; email?: string; rol?: string; bodega_cedi?: string; activo: boolean; }
   const [operadores,    setOperadores]    = useState<Operador[]>([]);
   const [opLoading,     setOpLoading]     = useState(false);
   const [opImporting,   setOpImporting]   = useState(false);
   const [showOpForm,    setShowOpForm]    = useState(false);
-  const [newOp, setNewOp] = useState({ nombre: "", cedula: "", email: "" });
+  const [newOp, setNewOp] = useState({ nombre: "", rol: "OPERADOR", email: "" });
   const opFileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -93,28 +93,29 @@ export default function ConfiguracionPage() {
 
   async function loadOperadores() {
     setOpLoading(true);
-    const { data } = await db.from("operadores").select("id,nombre,cedula,email,activo").order("nombre");
+    const { data } = await db.from("operadores_bodega")
+      .select("id,nombre,email,rol,bodega_cedi,activo").order("nombre");
     if (data) setOperadores(data as Operador[]);
     setOpLoading(false);
   }
 
   async function agregarOperador() {
     if (!newOp.nombre.trim()) { showFlash("⚠ El nombre es obligatorio", false); return; }
-    const { error } = await db.from("operadores").insert({
-      nombre: newOp.nombre.trim(),
-      cedula: newOp.cedula.trim() || null,
-      email:  newOp.email.trim()  || null,
+    const { error } = await db.from("operadores_bodega").insert({
+      nombre: newOp.nombre.trim().toUpperCase(),
+      rol:    newOp.rol || "OPERADOR",
+      email:  newOp.email.trim() || null,
       activo: true,
     });
     if (error) { showFlash(`❌ ${error.message}`, false); return; }
-    showFlash(`✓ Operador ${newOp.nombre} registrado`);
-    setNewOp({ nombre: "", cedula: "", email: "" });
+    showFlash(`✓ ${newOp.nombre} registrado`);
+    setNewOp({ nombre: "", rol: "OPERADOR", email: "" });
     setShowOpForm(false);
     loadOperadores();
   }
 
   async function toggleOperador(op: Operador) {
-    const { error } = await db.from("operadores").update({ activo: !op.activo }).eq("id", op.id);
+    const { error } = await db.from("operadores_bodega").update({ activo: !op.activo }).eq("id", op.id);
     if (!error) setOperadores(p => p.map(o => o.id === op.id ? { ...o, activo: !o.activo } : o));
     else showFlash(`❌ ${error.message}`, false);
   }
@@ -130,15 +131,14 @@ export default function ConfiguracionPage() {
       const norm = (v: unknown) =>
         String(v).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
-      // Auto-detect header
-      let hi = -1, niIdx = -1, ciIdx = -1, eiIdx = -1;
+      let hi = -1, niIdx = -1, eiIdx = -1, rolIdx = -1;
       for (let i = 0; i < Math.min(10, rows.length); i++) {
         const row = (rows[i] as unknown[]).map(norm);
         const ni = row.findIndex(c => c === "NOMBRE" || c === "OPERADOR" || c.startsWith("NOMB"));
         if (ni >= 0) {
           hi = i; niIdx = ni;
-          ciIdx = row.findIndex((c, idx) => idx !== ni && (c === "CEDULA" || c === "IDENTIFICACION" || c === "CI" || c.startsWith("CED")));
-          eiIdx = row.findIndex((c, idx) => idx !== ni && idx !== ciIdx && (c === "EMAIL" || c === "CORREO" || c.startsWith("MAIL")));
+          eiIdx  = row.findIndex((c, idx) => idx !== ni && (c === "EMAIL" || c === "CORREO" || c.startsWith("MAIL")));
+          rolIdx = row.findIndex((c, idx) => idx !== ni && (c === "ROL" || c === "CARGO" || c === "TIPO" || c.startsWith("ROL")));
           break;
         }
       }
@@ -148,15 +148,15 @@ export default function ConfiguracionPage() {
         return;
       }
 
-      const records: { nombre: string; cedula?: string; email?: string; activo: boolean }[] = [];
+      const records: { nombre: string; email?: string; rol?: string; activo: boolean }[] = [];
       for (let i = hi + 1; i < rows.length; i++) {
         const r = rows[i] as unknown[];
-        const nombre = String(r[niIdx] || "").trim();
+        const nombre = String(r[niIdx] || "").trim().toUpperCase();
         if (!nombre) continue;
         records.push({
           nombre,
-          cedula: ciIdx >= 0 ? String(r[ciIdx] || "").trim() || undefined : undefined,
-          email:  eiIdx >= 0 ? String(r[eiIdx] || "").trim() || undefined : undefined,
+          email:  eiIdx  >= 0 ? String(r[eiIdx]  || "").trim() || undefined : undefined,
+          rol:    rolIdx >= 0 ? String(r[rolIdx] || "").trim().toUpperCase() || "OPERADOR" : "OPERADOR",
           activo: true,
         });
       }
@@ -165,8 +165,8 @@ export default function ConfiguracionPage() {
       const BATCH = 200;
       let done = 0, errors = 0;
       for (let i = 0; i < records.length; i += BATCH) {
-        const { error } = await db.from("operadores")
-          .upsert(records.slice(i, i + BATCH), { onConflict: "cedula", ignoreDuplicates: false });
+        const { error } = await db.from("operadores_bodega")
+          .insert(records.slice(i, i + BATCH));
         if (error) errors++;
         else done += Math.min(BATCH, records.length - i);
       }
@@ -532,13 +532,17 @@ export default function ConfiguracionPage() {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 14px", marginBottom: 12 }}>
               <div>
                 <label style={s.fieldLabel}>NOMBRE *</label>
-                <input style={s.fieldInput} value={newOp.nombre} placeholder="Juan Pérez"
-                  onChange={e => setNewOp(p => ({ ...p, nombre: e.target.value }))} />
+                <input style={s.fieldInput} value={newOp.nombre} placeholder="JUAN PÉREZ"
+                  onChange={e => setNewOp(p => ({ ...p, nombre: e.target.value.toUpperCase() }))} />
               </div>
               <div>
-                <label style={s.fieldLabel}>CÉDULA</label>
-                <input style={s.fieldInput} value={newOp.cedula} placeholder="0912345678"
-                  onChange={e => setNewOp(p => ({ ...p, cedula: e.target.value }))} />
+                <label style={s.fieldLabel}>ROL</label>
+                <select style={s.fieldInput} value={newOp.rol}
+                  onChange={e => setNewOp(p => ({ ...p, rol: e.target.value }))}>
+                  <option value="OPERADOR">OPERADOR</option>
+                  <option value="SUPERVISOR">SUPERVISOR</option>
+                  <option value="JEFATURA">JEFATURA</option>
+                </select>
               </div>
               <div>
                 <label style={s.fieldLabel}>EMAIL</label>
@@ -549,7 +553,7 @@ export default function ConfiguracionPage() {
             <div style={{ display: "flex", gap: 8 }}>
               <button style={{ ...s.btnBulk, background: "#166534", borderColor: "#22c55e" }}
                 onClick={agregarOperador}>GUARDAR →</button>
-              <button style={s.btnRefresh} onClick={() => { setShowOpForm(false); setNewOp({ nombre: "", cedula: "", email: "" }); }}>Cancelar</button>
+              <button style={s.btnRefresh} onClick={() => { setShowOpForm(false); setNewOp({ nombre: "", rol: "OPERADOR", email: "" }); }}>Cancelar</button>
             </div>
           </div>
         )}
@@ -568,8 +572,8 @@ export default function ConfiguracionPage() {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{op.nombre}</div>
                   <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>
-                    {op.cedula && <span style={{ marginRight: 8 }}>CI: {op.cedula}</span>}
-                    {op.email  && <span>{op.email}</span>}
+                    {op.rol   && <span style={{ marginRight: 8, background: op.rol === "OPERADOR" ? "#dbeafe" : op.rol === "SUPERVISOR" ? "#dcfce7" : "#fef3c7", color: op.rol === "OPERADOR" ? "#1d4ed8" : op.rol === "SUPERVISOR" ? "#15803d" : "#92400e", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 700 }}>{op.rol}</span>}
+                    {op.email && <span>{op.email}</span>}
                   </div>
                 </div>
                 <button
