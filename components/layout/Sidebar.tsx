@@ -4,10 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import { logout } from "@/app/actions/auth";
+import { getBrowserClient } from "@/lib/supabase/browser";
 
 const NAV = [
   { href: "/dashboard",            icon: "⊞", label: "DASHBOARD" },
   { href: "/analisis-bpt",         icon: "⬡", label: "ANÁLISIS BPT" },
+  { href: "/ordenes-produccion",   icon: "📋", label: "ÓRDENES" },
   { href: "/operador",             icon: "👷", label: "OPERADOR" },
   { href: "/ubicacion-produccion", icon: "🗺", label: "UBICACIÓN" },
   { href: "/configuracion",        icon: "⚙", label: "CONFIGURACIÓN" },
@@ -15,8 +17,9 @@ const NAV = [
 
 export default function Sidebar({ email }: { email: string }) {
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(false);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed]     = useState(false);
+  const [mobileOpen, setMobileOpen]   = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
 
   useEffect(() => {
     const saved = localStorage.getItem("sidebar_collapsed");
@@ -25,6 +28,23 @@ export default function Sidebar({ email }: { email: string }) {
 
   // Close drawer on route change
   useEffect(() => { setMobileOpen(false); }, [pathname]);
+
+  // Real-time pending badge
+  useEffect(() => {
+    const db = getBrowserClient();
+    async function fetchCount() {
+      const { count } = await db
+        .from("lineas_reubicacion")
+        .select("id", { count: "exact", head: true })
+        .eq("estado", "pendiente");
+      setPendingCount(count ?? 0);
+    }
+    fetchCount();
+    const ch = db.channel("sidebar_pending")
+      .on("postgres_changes", { event: "*", schema: "public", table: "lineas_reubicacion" }, fetchCount)
+      .subscribe();
+    return () => { db.removeChannel(ch); };
+  }, []);
 
   function toggle() {
     setCollapsed(prev => {
@@ -58,6 +78,7 @@ export default function Sidebar({ email }: { email: string }) {
         <nav style={s.nav}>
           {NAV.map(({ href, icon, label }) => {
             const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
+            const showBadge = href === "/ordenes-produccion" && pendingCount > 0;
             return (
               <Link key={href} href={href} style={{ textDecoration: "none" }} title={collapsed ? label : undefined}>
                 <div style={{
@@ -66,11 +87,21 @@ export default function Sidebar({ email }: { email: string }) {
                   justifyContent: collapsed ? "center" : "flex-start",
                   padding: collapsed ? "10px 0" : "10px 12px",
                 }}>
-                  <span style={s.icon}>{icon}</span>
+                  <span style={{ ...s.icon, position: "relative" as const }}>
+                    {icon}
+                    {showBadge && collapsed && (
+                      <span style={s.badgeDot} />
+                    )}
+                  </span>
                   {!collapsed && (
-                    <span style={{ ...s.label, color: active ? "#f97316" : "#6b7280" }}>{label}</span>
+                    <>
+                      <span style={{ ...s.label, color: active ? "#f97316" : "#6b7280" }}>{label}</span>
+                      {showBadge && (
+                        <span style={s.badge}>{pendingCount > 99 ? "99+" : pendingCount}</span>
+                      )}
+                    </>
                   )}
-                  {active && !collapsed && <span style={s.dot} />}
+                  {active && !collapsed && !showBadge && <span style={s.dot} />}
                 </div>
               </Link>
             );
@@ -123,6 +154,7 @@ export default function Sidebar({ email }: { email: string }) {
             <nav style={{ flex: 1, padding: "10px 8px", display: "flex", flexDirection: "column", gap: 2 }}>
               {NAV.map(({ href, icon, label }) => {
                 const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
+                const showBadge = href === "/ordenes-produccion" && pendingCount > 0;
                 return (
                   <Link key={href} href={href} style={{ textDecoration: "none" }} onClick={() => setMobileOpen(false)}>
                     <div style={{
@@ -133,7 +165,8 @@ export default function Sidebar({ email }: { email: string }) {
                     }}>
                       <span style={{ ...s.icon, fontSize: 15 }}>{icon}</span>
                       <span style={{ ...s.label, color: active ? "#f97316" : "#6b7280" }}>{label}</span>
-                      {active && <span style={s.dot} />}
+                      {showBadge && <span style={s.badge}>{pendingCount > 99 ? "99+" : pendingCount}</span>}
+                      {active && !showBadge && <span style={s.dot} />}
                     </div>
                   </Link>
                 );
@@ -239,6 +272,30 @@ const s: { [k: string]: React.CSSProperties } = {
     cursor: "pointer",
     fontFamily: "'Courier New', monospace",
     textAlign: "center" as const,
+  },
+  badge: {
+    marginLeft: "auto",
+    background: "#f97316",
+    color: "#000",
+    fontSize: 9,
+    fontWeight: 800,
+    minWidth: 17,
+    height: 17,
+    borderRadius: 9,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "0 4px",
+    flexShrink: 0,
+  },
+  badgeDot: {
+    position: "absolute" as const,
+    top: -2,
+    right: -3,
+    width: 7,
+    height: 7,
+    borderRadius: "50%",
+    background: "#f97316",
   },
 };
 

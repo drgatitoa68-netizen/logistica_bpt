@@ -428,7 +428,7 @@ async function procesarComoLineas() {
     pallets:              item.pallets,
     cajas:                0,
     cantidad_fisica:      item.pallets,
-    estado:               "aprobada", // visible directo para operadores
+    estado:               "pendiente", // pasa por aprobación del supervisor
     created_at:           now,
     updated_at:           now,
   }));
@@ -441,7 +441,7 @@ async function procesarComoLineas() {
   setProcesando(false);
   if (errors === 0) {
     setProcesadoInfo({ count: done, subinv: selectedSubInv });
-    setImportLog(p => [...p, { msg: `✅ ${done} líneas de ${selectedSubInv} enviadas a operadores`, cls: "ok" }]);
+    setImportLog(p => [...p, { msg: `✅ ${done} líneas enviadas a revisión del supervisor`, cls: "ok" }]);
   } else {
     setImportLog(p => [...p, { msg: `⚠ ${done} creadas, ${errors} lotes con error`, cls: "warn" }]);
   }
@@ -604,8 +604,8 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
               <div style={{ marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
                 {procesadoInfo?.subinv === selectedSubInv ? (
                   <div style={{ background: "#0f2a0f", border: "1px solid #22c55e", borderRadius: 8, padding: "10px 16px", fontSize: 12, color: "#4ade80", textAlign: "center" as const }}>
-                    ✅ {procesadoInfo.count} líneas enviadas<br />
-                    <span style={{ fontSize: 10, color: "#86efac" }}>→ visibles en Operador</span>
+                    ✅ {procesadoInfo.count} líneas en revisión<br />
+                    <span style={{ fontSize: 10, color: "#86efac" }}>→ ir a Órdenes para aprobar</span>
                   </div>
                 ) : (
                   <button
@@ -620,11 +620,11 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
                       boxShadow: "0 2px 8px rgba(22,163,74,0.4)",
                     }}
                   >
-                    {procesando ? "⟳ Procesando…" : `▶ PROCESAR ${storedItems.filter(i => i.subinv === selectedSubInv).length} LÍNEAS → OPERADORES`}
+                    {procesando ? "⟳ Procesando…" : `▶ ENVIAR ${storedItems.filter(i => i.subinv === selectedSubInv).length} LÍNEAS A REVISIÓN`}
                   </button>
                 )}
                 <span style={{ fontSize: 10, color: "#5a5e75", textAlign: "right" as const }}>
-                  Crea las líneas de {selectedSubInv} como aprobadas
+                  Crea las líneas como pendientes para revisión del supervisor
                 </span>
               </div>
             )}
