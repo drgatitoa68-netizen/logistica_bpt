@@ -62,6 +62,15 @@ export default function ConfiguracionPage() {
   const [catalogDragging, setCatalogDragging] = useState(false);
   const catalogRef = useRef<HTMLInputElement>(null);
 
+  // Operadores
+  interface Operador { id: string; nombre: string; cedula: string; email: string; activo: boolean; }
+  const [operadores,    setOperadores]    = useState<Operador[]>([]);
+  const [opLoading,     setOpLoading]     = useState(false);
+  const [opImporting,   setOpImporting]   = useState(false);
+  const [showOpForm,    setShowOpForm]    = useState(false);
+  const [newOp, setNewOp] = useState({ nombre: "", cedula: "", email: "" });
+  const opFileRef = useRef<HTMLInputElement>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     const { data, error } = await db
@@ -73,13 +82,101 @@ export default function ConfiguracionPage() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); fetchCatalogCount(); }, [load]);
+  useEffect(() => { load(); fetchCatalogCount(); loadOperadores(); }, [load]);
 
   async function fetchCatalogCount() {
     const { count } = await db
       .from("catalogo_metraje")
       .select("codigo", { count: "exact", head: true });
     setCatalogCount(count ?? 0);
+  }
+
+  async function loadOperadores() {
+    setOpLoading(true);
+    const { data } = await db.from("operadores").select("id,nombre,cedula,email,activo").order("nombre");
+    if (data) setOperadores(data as Operador[]);
+    setOpLoading(false);
+  }
+
+  async function agregarOperador() {
+    if (!newOp.nombre.trim()) { showFlash("⚠ El nombre es obligatorio", false); return; }
+    const { error } = await db.from("operadores").insert({
+      nombre: newOp.nombre.trim(),
+      cedula: newOp.cedula.trim() || null,
+      email:  newOp.email.trim()  || null,
+      activo: true,
+    });
+    if (error) { showFlash(`❌ ${error.message}`, false); return; }
+    showFlash(`✓ Operador ${newOp.nombre} registrado`);
+    setNewOp({ nombre: "", cedula: "", email: "" });
+    setShowOpForm(false);
+    loadOperadores();
+  }
+
+  async function toggleOperador(op: Operador) {
+    const { error } = await db.from("operadores").update({ activo: !op.activo }).eq("id", op.id);
+    if (!error) setOperadores(p => p.map(o => o.id === op.id ? { ...o, activo: !o.activo } : o));
+    else showFlash(`❌ ${error.message}`, false);
+  }
+
+  async function importarOperadores(file: File) {
+    setOpImporting(true);
+    try {
+      const buf  = await file.arrayBuffer();
+      const wb   = XLSX.read(buf, { type: "array" });
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][];
+
+      const norm = (v: unknown) =>
+        String(v).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+      // Auto-detect header
+      let hi = -1, niIdx = -1, ciIdx = -1, eiIdx = -1;
+      for (let i = 0; i < Math.min(10, rows.length); i++) {
+        const row = (rows[i] as unknown[]).map(norm);
+        const ni = row.findIndex(c => c === "NOMBRE" || c === "OPERADOR" || c.startsWith("NOMB"));
+        if (ni >= 0) {
+          hi = i; niIdx = ni;
+          ciIdx = row.findIndex((c, idx) => idx !== ni && (c === "CEDULA" || c === "IDENTIFICACION" || c === "CI" || c.startsWith("CED")));
+          eiIdx = row.findIndex((c, idx) => idx !== ni && idx !== ciIdx && (c === "EMAIL" || c === "CORREO" || c.startsWith("MAIL")));
+          break;
+        }
+      }
+      if (hi < 0 || niIdx < 0) {
+        showFlash("⚠ No se encontró columna NOMBRE en el archivo", false);
+        setOpImporting(false);
+        return;
+      }
+
+      const records: { nombre: string; cedula?: string; email?: string; activo: boolean }[] = [];
+      for (let i = hi + 1; i < rows.length; i++) {
+        const r = rows[i] as unknown[];
+        const nombre = String(r[niIdx] || "").trim();
+        if (!nombre) continue;
+        records.push({
+          nombre,
+          cedula: ciIdx >= 0 ? String(r[ciIdx] || "").trim() || undefined : undefined,
+          email:  eiIdx >= 0 ? String(r[eiIdx] || "").trim() || undefined : undefined,
+          activo: true,
+        });
+      }
+      if (!records.length) { showFlash("⚠ No se encontraron filas válidas", false); setOpImporting(false); return; }
+
+      const BATCH = 200;
+      let done = 0, errors = 0;
+      for (let i = 0; i < records.length; i += BATCH) {
+        const { error } = await db.from("operadores")
+          .upsert(records.slice(i, i + BATCH), { onConflict: "cedula", ignoreDuplicates: false });
+        if (error) errors++;
+        else done += Math.min(BATCH, records.length - i);
+      }
+      setOpImporting(false);
+      if (!errors) { showFlash(`✓ ${done} operadores importados`); loadOperadores(); }
+      else showFlash(`⚠ ${done} importados, ${errors} lotes con error`, false);
+    } catch (e) {
+      setOpImporting(false);
+      showFlash(`❌ ${e instanceof Error ? e.message : String(e)}`, false);
+    }
   }
 
   async function uploadCatalog(file: File) {
@@ -399,6 +496,94 @@ export default function ConfiguracionPage() {
           onChange={e => { const f = e.target.files?.[0]; if (f) { uploadCatalog(f); e.target.value = ""; } }} />
       </div>
 
+      {/* ── OPERADORES ───────────────────────────────────────────────────── */}
+      <div style={s.opSection}>
+        {/* Header de la sección */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 10, marginBottom: 14 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#0f172a", letterSpacing: 0.5 }}>
+              👷 Operadores
+              <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: operadores.filter(o => o.activo).length > 0 ? "#4ade80" : "#94a3b8" }}>
+                {operadores.filter(o => o.activo).length} activos · {operadores.length} total
+              </span>
+            </div>
+            <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>
+              Importa desde Excel (columnas: NOMBRE, CÉDULA, EMAIL) o agrega manualmente
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={{ ...s.btnBulk, background: "#166534", borderColor: "#22c55e" }}
+              onClick={() => setShowOpForm(v => !v)}>
+              + AGREGAR
+            </button>
+            <button style={{ ...s.btnBulk, background: "#c2410c", borderColor: "transparent" }}
+              onClick={() => opFileRef.current?.click()} disabled={opImporting}>
+              {opImporting ? "⟳ Importando…" : "↑ IMPORTAR EXCEL"}
+            </button>
+            <input ref={opFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
+              onChange={e => { const f = e.target.files?.[0]; if (f) { importarOperadores(f); e.target.value = ""; } }} />
+          </div>
+        </div>
+
+        {/* Formulario nuevo operador */}
+        {showOpForm && (
+          <div style={s.opFormBox}>
+            <div style={{ fontSize: 9, letterSpacing: 2, color: "#f97316", fontWeight: 600, marginBottom: 12 }}>NUEVO OPERADOR</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 14px", marginBottom: 12 }}>
+              <div>
+                <label style={s.fieldLabel}>NOMBRE *</label>
+                <input style={s.fieldInput} value={newOp.nombre} placeholder="Juan Pérez"
+                  onChange={e => setNewOp(p => ({ ...p, nombre: e.target.value }))} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>CÉDULA</label>
+                <input style={s.fieldInput} value={newOp.cedula} placeholder="0912345678"
+                  onChange={e => setNewOp(p => ({ ...p, cedula: e.target.value }))} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>EMAIL</label>
+                <input style={s.fieldInput} value={newOp.email} placeholder="juan@empresa.com"
+                  onChange={e => setNewOp(p => ({ ...p, email: e.target.value }))} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={{ ...s.btnBulk, background: "#166534", borderColor: "#22c55e" }}
+                onClick={agregarOperador}>GUARDAR →</button>
+              <button style={s.btnRefresh} onClick={() => { setShowOpForm(false); setNewOp({ nombre: "", cedula: "", email: "" }); }}>Cancelar</button>
+            </div>
+          </div>
+        )}
+
+        {/* Lista de operadores */}
+        {opLoading ? (
+          <div style={{ fontSize: 11, color: "#64748b", padding: 16 }}>Cargando operadores…</div>
+        ) : operadores.length === 0 ? (
+          <div style={{ fontSize: 11, color: "#94a3b8", padding: "16px 0", textAlign: "center" as const }}>
+            Sin operadores registrados — importa el Excel del otro proyecto o agrega manualmente
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
+            {operadores.map(op => (
+              <div key={op.id} style={{ ...s.opCard, opacity: op.activo ? 1 : 0.5 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{op.nombre}</div>
+                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>
+                    {op.cedula && <span style={{ marginRight: 8 }}>CI: {op.cedula}</span>}
+                    {op.email  && <span>{op.email}</span>}
+                  </div>
+                </div>
+                <button
+                  style={{ ...s.actionBtn, borderColor: op.activo ? "rgba(248,113,113,0.4)" : "rgba(74,222,128,0.4)", color: op.activo ? "#f87171" : "#4ade80", flexShrink: 0 }}
+                  onClick={() => toggleOperador(op)}
+                >
+                  {op.activo ? "Desactivar" : "Activar"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Stats */}
       <div style={s.statsRow}>
         {[
@@ -715,6 +900,9 @@ const s: { [k: string]: React.CSSProperties } = {
   title: { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#0f172a", letterSpacing: 1 },
   sub: { margin: 0, fontSize: 11, color: "#64748b" },
   catalogBox: { border: "1px solid", borderRadius: 4, padding: "12px 16px", marginBottom: 18, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" as const, transition: "border-color .2s, background .2s" },
+  opSection:  { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 4, padding: "16px 18px", marginBottom: 18 },
+  opFormBox:  { background: "#fff", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 4, padding: "14px 16px", marginBottom: 14 },
+  opCard:     { background: "#fff", border: "1px solid rgba(249,115,22,0.12)", borderRadius: 4, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 },
   btnBulk: { background: "#1d4ed8", border: "none", color: "#fff", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   btnRefresh: { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#64748b", fontSize: 11, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   statsRow: { display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" as const },
