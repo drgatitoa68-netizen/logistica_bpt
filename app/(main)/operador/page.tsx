@@ -96,7 +96,7 @@ export default function OperadorPage() {
   };
 
   return (
-    <div style={s.root}>
+    <div style={s.root} className="page-root">
       {flash && <div style={s.flash}>{flash}</div>}
 
       <div style={s.pageHeader}>
@@ -106,7 +106,7 @@ export default function OperadorPage() {
       </div>
 
       {/* Stats */}
-      <div style={s.statsRow}>
+      <div style={s.statsRow} className="stats-4col">
         <div style={s.statCard}>
           <div style={{ fontSize: 26, fontWeight: 700, color: "#4ade80" }}>{stats.asignadas}</div>
           <div style={s.statLabel}>POR INICIAR</div>
@@ -150,7 +150,7 @@ export default function OperadorPage() {
           {filtro === "aprobada" && <div style={{ fontSize: 11, marginTop: 8, color: "#374151" }}>Cuando el supervisor apruebe una línea, aparecerá aquí en tiempo real</div>}
         </div>
       ) : (
-        <div style={s.cards}>
+        <div style={s.cards} className="cards-responsive">
           {filtradas.map(l => {
             const viajes = viajesPorLinea(l.pallets || 0);
             const isExpanded = expanded === l.id;

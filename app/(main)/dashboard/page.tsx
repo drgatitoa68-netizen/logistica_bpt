@@ -41,7 +41,7 @@ export default async function DashboardPage() {
   ];
 
   return (
-    <div style={s.root}>
+    <div style={s.root} className="page-root">
       <div style={s.header}>
         <div style={s.badge}>PANEL DE CONTROL</div>
         <h1 style={s.title}>Sistema Logístico</h1>
@@ -65,7 +65,7 @@ export default async function DashboardPage() {
 }
 
 const s: { [k: string]: React.CSSProperties } = {
-  root:      { padding: "40px 32px", fontFamily: "'Courier New', monospace", color: "#1e293b", maxWidth: 900 },
+  root:      { padding: "40px 32px", fontFamily: "'Courier New', monospace", color: "#1e293b", maxWidth: 900, boxSizing: "border-box" },
   header:    { marginBottom: 36, display: "flex", flexDirection: "column", gap: 8 },
   badge:     { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", width: "fit-content" },
   title:     { margin: 0, fontSize: 28, fontWeight: 700, color: "#0f172a", letterSpacing: 1 },

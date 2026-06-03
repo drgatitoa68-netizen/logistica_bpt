@@ -779,7 +779,7 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
     </div>
 
     {/* Contenido + panel lateral */}
-    <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+    <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }} className="analisis-content-row">
 
       <div style={{ flex: 1, minWidth: 0 }}>
         {loading ? (
@@ -939,7 +939,7 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
         const label = p > 1.1 ? "EXCESO" : p >= 1.0 ? "LLENO" : p >= 0.8 ? "ALTO" : p > 0 ? "EN USO" : "VACÍO";
         const subQty= subInvMap ? (subInvMap[d.localizador.toUpperCase()] ?? 0) : null;
         return (
-          <div style={{ width: 235, flexShrink: 0, background: "#1a1d27", border: "1px solid #4a5175", borderRadius: 10, padding: "15px", position: "sticky", top: 80 }}>
+          <div className="analisis-side-panel" style={{ width: 235, flexShrink: 0, background: "#1a1d27", border: "1px solid #4a5175", borderRadius: 10, padding: "15px", position: "sticky", top: 80 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
               <div>
                 <div style={{ fontSize: 18, fontWeight: 700 }}>{d.localizador}</div>

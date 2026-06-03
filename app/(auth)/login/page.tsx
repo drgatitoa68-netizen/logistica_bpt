@@ -24,8 +24,8 @@ export default function LoginPage() {
         <path d="M600 150 Q400 300 200 450" stroke="#f97316" strokeWidth="1" fill="none" opacity="0.25" />
       </svg>
 
-      <div style={styles.card}>
-        <div style={styles.leftPanel}>
+      <div style={styles.card} className="login-card">
+        <div style={styles.leftPanel} className="login-left-panel">
           <div style={styles.badge}>SISTEMA DE GESTIÓN</div>
           <div style={styles.logo}>
             <span style={styles.logoIcon}>⬡</span>
@@ -53,7 +53,7 @@ export default function LoginPage() {
           </div>
         </div>
 
-        <div style={styles.rightPanel}>
+        <div style={styles.rightPanel} className="login-right-panel">
           <h2 style={styles.formTitle}>Iniciar Sesión</h2>
           <p style={styles.formSub}>Ingresa tus credenciales de acceso</p>
 

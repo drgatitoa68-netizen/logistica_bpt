@@ -242,7 +242,7 @@ export default function ConfiguracionPage() {
   };
 
   return (
-    <div style={s.root}>
+    <div style={s.root} className="page-root">
       {flash && (
         <div style={{ ...s.flash, borderColor: flash.ok ? "rgba(74,222,128,0.4)" : "rgba(248,113,113,0.4)", color: flash.ok ? "#4ade80" : "#f87171" }}>
           {flash.msg}

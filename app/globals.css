@@ -27,3 +27,44 @@ body {
 ::-webkit-scrollbar-track { background: #e2e8f0; }
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* ── Responsive utilities ──────────────────────────────────── */
+
+/* Desktop sidebar / mobile bar visibility */
+.sidebar-desktop   { display: flex; }
+.sidebar-mobile-bar { display: none !important; }
+
+/* Main content area */
+.layout-main {
+  flex: 1;
+  overflow: auto;
+  min-width: 0;
+  background: #f1f5f9;
+}
+
+@media (max-width: 768px) {
+  /* Swap sidebar → top bar */
+  .sidebar-desktop    { display: none !important; }
+  .sidebar-mobile-bar { display: flex !important; }
+
+  /* Push content below 56px top bar */
+  .layout-main { padding-top: 56px !important; }
+
+  /* Page root padding */
+  .page-root { padding: 16px 14px !important; }
+
+  /* 4-column stats → 2 columns */
+  .stats-4col { grid-template-columns: repeat(2, 1fr) !important; }
+
+  /* Cards grid → single column */
+  .cards-responsive { grid-template-columns: 1fr !important; }
+
+  /* Analisis BPT: panel beside map → stacked below */
+  .analisis-content-row { flex-direction: column !important; }
+  .analisis-side-panel  { width: 100% !important; position: static !important; }
+
+  /* Login: hide left decorative panel */
+  .login-card        { flex-direction: column !important; max-width: 440px !important; }
+  .login-left-panel  { display: none !important; }
+  .login-right-panel { padding: 36px 24px !important; width: 100% !important; }
+}

@@ -13,7 +13,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: "#f1f5f9" }}>
       <Sidebar email={user.email ?? ""} />
-      <main style={{ flex: 1, overflow: "auto", minWidth: 0, background: "#f1f5f9" }}>
+      <main className="layout-main">
         {children}
       </main>
     </div>
