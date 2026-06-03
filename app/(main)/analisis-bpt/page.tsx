@@ -4,7 +4,7 @@ import { getBrowserClient } from "@/lib/supabase/browser";
 const db = getBrowserClient();
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface Localizador { zona: string; localizador: string; formato?: string; capacidad: number; ocupado: number; disponible: number; pct_ocupacion: number; activo?: boolean; }
-interface SubInvItem { loc: string; subinv: string; formato: string; lote: string; pallets: number; codigo?: string; }
+interface SubInvItem { loc: string; subinv: string; formato: string; lote: string; pallets: number; codigo?: string; descripcion?: string; cod_org_inv?: string; }
 interface Asignacion { loc: string; zona: string; palletsAsignados: number; }
 interface PlanEntry { formato: string; lote: string; palletsNeed: number; asignaciones: Asignacion[]; palletsAsignados: number; palletsRestantes: number; }
 interface TooltipData { d: Localizador; zona: string; x: number; y: number; } interface SelectedLoc { d: Localizador; zona: string; }
@@ -40,7 +40,7 @@ function matchFilter(p: number) { if (fStatus === "all") return true; if (fStatu
 const allLocs = Object.values(allData).flat(); const totalCap = allLocs.reduce((s, d) => s + (d.capacidad || 0), 0); const totalOcup = allLocs.reduce((s, d) => s + (d.ocupado || 0), 0); const avgGlobal = totalCap > 0 ? totalOcup / totalCap : 0; const subInvMap = selectedSubInv !== "all" ? (subInvStock[selectedSubInv] ?? {}) : null; const subInvStats = subInvMap ? (() => { const keys = Object.keys(subInvMap); const total = keys.reduce((s, k) => s + (subInvMap[k] || 0), 0); return { locs: keys.length, total }; })() : null; const totalPalletsLibres = allLocs.reduce((s, d) => s + Math.max(0, d.disponible || 0), 0);
 const stats = [ { v: allLocs.length, l: "Localizadores" }, { v: Object.keys(allData).length, l: "Zonas" }, { v: (avgGlobal * 100).toFixed(1) + "%", l: "Ocupación global" }, { v: allLocs.filter(d => d.ocupado > 0).length, l: "Con stock" }, { v: totalPalletsLibres, l: "Pallets libres" }, { v: allLocs.filter(d => d.pct_ocupacion > 1.0).length, l: "Con exceso" }, ];
 // ── Detectar columnas del Excel ─────────────────────────────────────────
-function detectHeader(rows: unknown[][]): { headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number; cantColIdx: number; subInvColIdx: number; formatoColIdx: number; loteColIdx: number; codigoColIdx: number; } { let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1; let cajasColIdx = -1, cantColIdx = -1, subInvColIdx = -1; let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1;
+function detectHeader(rows: unknown[][]): { headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number; cantColIdx: number; subInvColIdx: number; formatoColIdx: number; loteColIdx: number; codigoColIdx: number; descColIdx: number; codOrgColIdx: number; } { let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1; let cajasColIdx = -1, cantColIdx = -1, subInvColIdx = -1; let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1, descColIdx = -1, codOrgColIdx = -1;
 for (let i = 0; i < Math.min(30, rows.length); i++) {
   const row = (rows[i] as unknown[]).map(c =>
     String(c).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
@@ -109,6 +109,26 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
     if (qi >= 0) { cantColIdx = qi; break; }
   }
 
+  // Descripción del producto
+  const descKw = ["DESCRIPCION", "DESCRIPCI", "DESC", "PRODUCTO", "NOMBRE PRODUCTO", "ARTICULO DESC"];
+  for (const kw of descKw) {
+    const di = row.findIndex((c, idx) =>
+      idx !== li && idx !== subInvColIdx && idx !== formatoColIdx && idx !== loteColIdx && idx !== codigoColIdx &&
+      (c === kw || c.startsWith(kw))
+    );
+    if (di >= 0) { descColIdx = di; break; }
+  }
+
+  // Cod. Org Inv (grupo / bodega de referencia como GR101)
+  const codOrgKw = ["COD ORG INV", "COD.ORG.INV", "CODORG", "CODORGINV", "CODIGO ORG", "ORGANIZACION"];
+  for (const kw of codOrgKw) {
+    const oi = row.findIndex((c, idx) =>
+      idx !== li && idx !== codigoColIdx && idx !== descColIdx &&
+      (c === kw || c.startsWith(kw))
+    );
+    if (oi >= 0) { codOrgColIdx = oi; break; }
+  }
+
   if (tarimasColIdx < 0 && cantColIdx < 0) {
     const nr = (rows[Math.min(i + 1, rows.length - 1)] as unknown[]);
     for (let ci = li + 1; ci < row.length; ci++) {
@@ -119,7 +139,7 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
   }
   break;
 }
-return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx };
+return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgColIdx };
 }
 // ── Procesar Excel ─────────────────────────────────────────────────────
 async function processExcel(file: File) { setImporting(true); setProgress(0); setProgressLabel(""); setImportLog([]);
@@ -191,7 +211,7 @@ try {
     setProgress(8);
 
     log("⟳ Detectando estructura del archivo…");
-    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx } = detectHeader(rows);
+    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgColIdx } = detectHeader(rows);
 
     if (headerRowIdx < 0 || locColIdx < 0) {
       const preview = rows.slice(0, 8).map((r, i) =>
@@ -250,15 +270,17 @@ try {
 
       // Acumular por subinventario
       if (subInvColIdx >= 0) {
-        const si  = String(r[subInvColIdx] || "").trim();
-        const fmt = formatoColIdx  >= 0 ? String(r[formatoColIdx]  || "").trim() : "";
-        const lot = loteColIdx     >= 0 ? String(r[loteColIdx]     || "").trim() : "";
-        const cod = codigoColIdx   >= 0 ? String(r[codigoColIdx]   || "").trim() : "";
+        const si     = String(r[subInvColIdx]  || "").trim();
+        const fmt    = formatoColIdx  >= 0 ? String(r[formatoColIdx]  || "").trim() : "";
+        const lot    = loteColIdx     >= 0 ? String(r[loteColIdx]     || "").trim() : "";
+        const cod    = codigoColIdx   >= 0 ? String(r[codigoColIdx]   || "").trim() : "";
+        const desc   = descColIdx     >= 0 ? String(r[descColIdx]     || "").trim() : "";
+        const codOrg = codOrgColIdx   >= 0 ? String(r[codOrgColIdx]   || "").trim() : "";
         if (si) {
           subInvSet.add(si);
           if (!bySubInv[si]) bySubInv[si] = {};
           bySubInv[si][loc] = (bySubInv[si][loc] ?? 0) + pallets;
-          subInvItems.push({ loc, subinv: si, formato: fmt, lote: lot, pallets, codigo: cod });
+          subInvItems.push({ loc, subinv: si, formato: fmt, lote: lot, pallets, codigo: cod, descripcion: desc, cod_org_inv: codOrg });
         }
       }
     }
@@ -476,16 +498,22 @@ async function procesarComoLineas() {
     const codKey = (item.codigo || "").toUpperCase().trim();
     const m2Unit = (hasCatalog && codKey && catalogMap[codKey]) ? catalogMap[codKey] : M2_DEFAULT;
     return {
-      descripcion:             `${item.subinv} · ${item.formato || "Sin formato"}`,
+      // Datos del producto desde el Excel
+      cod_org_inv:             item.cod_org_inv  || null,
+      codigo:                  item.codigo       || null,
+      descripcion:             item.descripcion  || `${item.subinv} · ${item.formato || "Sin formato"}`,
+      // Origen
       subinventario_origen:    item.subinv,
       localizador_origen:      item.loc,
       lote:                    item.lote || null,
+      // Cantidades
       pallets:                 item.pallets,
       cajas:                   0,
       cantidad_fisica:         item.pallets,
       metraje:                 Math.round(item.pallets * m2Unit * 100) / 100,
+      // Destino: localizador asignado + su zona como subinventario
       localizador_destino:     dest?.localizador ?? null,
-      subinventario_destino:   dest ? "ALMACEN" : null,
+      subinventario_destino:   dest?.zona        ?? null,   // ← ZONA02, ZONA05, etc.
       estado:                  "pendiente",
       created_at:              now,
       updated_at:              now,
