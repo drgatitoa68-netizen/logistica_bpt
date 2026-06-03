@@ -54,7 +54,21 @@ CREATE TABLE IF NOT EXISTS public.lineas_reubicacion (
   updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- ── 3. TABLA: catalogo_metraje ───────────────────────────
+-- ── 3. TABLA: operadores ─────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.operadores (
+  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre     TEXT         NOT NULL,
+  cedula     TEXT         UNIQUE,
+  email      TEXT,
+  activo     BOOLEAN      NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.operadores ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "auth_all_operadores" ON public.operadores
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- ── 4. TABLA: catalogo_metraje ───────────────────────────
 CREATE TABLE IF NOT EXISTS public.catalogo_metraje (
   codigo             TEXT         PRIMARY KEY,
   descripcion        TEXT,
