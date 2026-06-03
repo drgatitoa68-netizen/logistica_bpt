@@ -3,8 +3,7 @@
 -- Ejecutar en: Supabase Dashboard → SQL Editor → New query
 -- ═══════════════════════════════════════════════════════
 
--- ── MIGRACIÓN: agregar metraje a tabla existente ─────────
--- Si la tabla ya existe, ejecuta solo este bloque:
+-- ── MIGRACIONES (si las tablas ya existen) ──────────────
 ALTER TABLE public.lineas_reubicacion
   ADD COLUMN IF NOT EXISTS metraje NUMERIC(12,2);
 -- ────────────────────────────────────────────────────────
@@ -55,7 +54,24 @@ CREATE TABLE IF NOT EXISTS public.lineas_reubicacion (
   updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- ── 3. ÍNDICES (performance) ─────────────────────────────
+-- ── 3. TABLA: catalogo_metraje ───────────────────────────
+CREATE TABLE IF NOT EXISTS public.catalogo_metraje (
+  codigo             TEXT         PRIMARY KEY,
+  descripcion        TEXT,
+  metraje_por_pallet NUMERIC(8,4) NOT NULL DEFAULT 1.2,
+  updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.catalogo_metraje ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "auth_select_catalogo" ON public.catalogo_metraje
+  FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_insert_catalogo" ON public.catalogo_metraje
+  FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY "auth_update_catalogo" ON public.catalogo_metraje
+  FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+
+-- ── 4. ÍNDICES (performance) ─────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_loc_activo_zona_loc
   ON public.localizadores(activo, zona, localizador);
 

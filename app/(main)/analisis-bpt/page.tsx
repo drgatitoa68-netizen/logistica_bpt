@@ -4,7 +4,7 @@ import { getBrowserClient } from "@/lib/supabase/browser";
 const db = getBrowserClient();
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface Localizador { zona: string; localizador: string; formato?: string; capacidad: number; ocupado: number; disponible: number; pct_ocupacion: number; activo?: boolean; }
-interface SubInvItem { loc: string; subinv: string; formato: string; lote: string; pallets: number; }
+interface SubInvItem { loc: string; subinv: string; formato: string; lote: string; pallets: number; codigo?: string; }
 interface Asignacion { loc: string; zona: string; palletsAsignados: number; }
 interface PlanEntry { formato: string; lote: string; palletsNeed: number; asignaciones: Asignacion[]; palletsAsignados: number; palletsRestantes: number; }
 interface TooltipData { d: Localizador; zona: string; x: number; y: number; } interface SelectedLoc { d: Localizador; zona: string; }
@@ -40,7 +40,7 @@ function matchFilter(p: number) { if (fStatus === "all") return true; if (fStatu
 const allLocs = Object.values(allData).flat(); const totalCap = allLocs.reduce((s, d) => s + (d.capacidad || 0), 0); const totalOcup = allLocs.reduce((s, d) => s + (d.ocupado || 0), 0); const avgGlobal = totalCap > 0 ? totalOcup / totalCap : 0; const subInvMap = selectedSubInv !== "all" ? (subInvStock[selectedSubInv] ?? {}) : null; const subInvStats = subInvMap ? (() => { const keys = Object.keys(subInvMap); const total = keys.reduce((s, k) => s + (subInvMap[k] || 0), 0); return { locs: keys.length, total }; })() : null; const totalPalletsLibres = allLocs.reduce((s, d) => s + Math.max(0, d.disponible || 0), 0);
 const stats = [ { v: allLocs.length, l: "Localizadores" }, { v: Object.keys(allData).length, l: "Zonas" }, { v: (avgGlobal * 100).toFixed(1) + "%", l: "Ocupación global" }, { v: allLocs.filter(d => d.ocupado > 0).length, l: "Con stock" }, { v: totalPalletsLibres, l: "Pallets libres" }, { v: allLocs.filter(d => d.pct_ocupacion > 1.0).length, l: "Con exceso" }, ];
 // ── Detectar columnas del Excel ─────────────────────────────────────────
-function detectHeader(rows: unknown[][]): { headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number; cantColIdx: number; subInvColIdx: number; formatoColIdx: number; loteColIdx: number; } { let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1; let cajasColIdx = -1, cantColIdx = -1, subInvColIdx = -1; let formatoColIdx = -1, loteColIdx = -1;
+function detectHeader(rows: unknown[][]): { headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number; cantColIdx: number; subInvColIdx: number; formatoColIdx: number; loteColIdx: number; codigoColIdx: number; } { let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1; let cajasColIdx = -1, cantColIdx = -1, subInvColIdx = -1; let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1;
 for (let i = 0; i < Math.min(30, rows.length); i++) {
   const row = (rows[i] as unknown[]).map(c =>
     String(c).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
@@ -69,6 +69,16 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
     (c === "LOTE" || c === "LOT" || c === "NUM_LOTE" || c === "NUMERO_LOTE" ||
      c === "NUMERO LOTE" || c === "NRO_LOTE" || c.startsWith("LOTE"))
   );
+
+  const codKw = ["CODIGO", "COD", "CODART", "COD ART", "ARTICULO", "ITEM", "SKU",
+                 "COD.ORG", "COD_ORG", "CODIGO ARTICULO", "CODIGO PRODUCTO"];
+  for (const kw of codKw) {
+    const ci = row.findIndex((c, idx) =>
+      idx !== li && idx !== subInvColIdx && idx !== formatoColIdx && idx !== loteColIdx &&
+      (c === kw || c.startsWith(kw))
+    );
+    if (ci >= 0) { codigoColIdx = ci; break; }
+  }
 
   const tarimKw = ["TARIMA", "TARIMAS", "PALLET", "PALLETS", "ESTIBA",
                    "NRO TARIMA", "NTAR", "NUM TARIMA", "PALETA", "PALETAS"];
@@ -109,7 +119,7 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
   }
   break;
 }
-return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx };
+return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx };
 }
 // ── Procesar Excel ─────────────────────────────────────────────────────
 async function processExcel(file: File) { setImporting(true); setProgress(0); setProgressLabel(""); setImportLog([]);
@@ -181,7 +191,7 @@ try {
     setProgress(8);
 
     log("⟳ Detectando estructura del archivo…");
-    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx } = detectHeader(rows);
+    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx } = detectHeader(rows);
 
     if (headerRowIdx < 0 || locColIdx < 0) {
       const preview = rows.slice(0, 8).map((r, i) =>
@@ -241,13 +251,14 @@ try {
       // Acumular por subinventario
       if (subInvColIdx >= 0) {
         const si  = String(r[subInvColIdx] || "").trim();
-        const fmt = formatoColIdx >= 0 ? String(r[formatoColIdx] || "").trim() : "";
-        const lot = loteColIdx    >= 0 ? String(r[loteColIdx]    || "").trim() : "";
+        const fmt = formatoColIdx  >= 0 ? String(r[formatoColIdx]  || "").trim() : "";
+        const lot = loteColIdx     >= 0 ? String(r[loteColIdx]     || "").trim() : "";
+        const cod = codigoColIdx   >= 0 ? String(r[codigoColIdx]   || "").trim() : "";
         if (si) {
           subInvSet.add(si);
           if (!bySubInv[si]) bySubInv[si] = {};
           bySubInv[si][loc] = (bySubInv[si][loc] ?? 0) + pallets;
-          subInvItems.push({ loc, subinv: si, formato: fmt, lote: lot, pallets });
+          subInvItems.push({ loc, subinv: si, formato: fmt, lote: lot, pallets, codigo: cod });
         }
       }
     }
@@ -447,10 +458,23 @@ async function procesarComoLineas() {
     return best;
   }
 
-  // 3. Construir registros con destino y metraje calculado
-  const M2 = 1.2; // m² por pallet estándar
+  // 3. Cargar catálogo de metraje por código de producto
+  const { data: catalogData } = await db
+    .from("catalogo_metraje")
+    .select("codigo,metraje_por_pallet");
+
+  const catalogMap: Record<string, number> = {};
+  for (const c of catalogData ?? []) {
+    catalogMap[(c.codigo || "").toUpperCase().trim()] = Number(c.metraje_por_pallet);
+  }
+  const hasCatalog = Object.keys(catalogMap).length > 0;
+
+  // 4. Construir registros con destino y metraje calculado
+  const M2_DEFAULT = 1.2; // fallback m²/pallet si no está en catálogo
   const records = items.map(item => {
-    const dest = asignarDestino(item.pallets, item.formato || "");
+    const dest   = asignarDestino(item.pallets, item.formato || "");
+    const codKey = (item.codigo || "").toUpperCase().trim();
+    const m2Unit = (hasCatalog && codKey && catalogMap[codKey]) ? catalogMap[codKey] : M2_DEFAULT;
     return {
       descripcion:             `${item.subinv} · ${item.formato || "Sin formato"}`,
       subinventario_origen:    item.subinv,
@@ -459,7 +483,7 @@ async function procesarComoLineas() {
       pallets:                 item.pallets,
       cajas:                   0,
       cantidad_fisica:         item.pallets,
-      metraje:                 Math.round(item.pallets * M2 * 100) / 100,
+      metraje:                 Math.round(item.pallets * m2Unit * 100) / 100,
       localizador_destino:     dest?.localizador ?? null,
       subinventario_destino:   dest ? "ALMACEN" : null,
       estado:                  "pendiente",

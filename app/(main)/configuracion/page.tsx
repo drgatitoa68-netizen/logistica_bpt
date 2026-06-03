@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { getBrowserClient } from "@/lib/supabase/browser";
+import * as XLSX from "xlsx";
 
 const db = getBrowserClient();
 
@@ -55,6 +56,12 @@ export default function ConfiguracionPage() {
   const [nzPreview, setNzPreview]       = useState<string[]>([]);
   const [savingZona, setSavingZona]     = useState(false);
 
+  // Catálogo de metraje
+  const [catalogCount,    setCatalogCount]    = useState<number | null>(null);
+  const [catalogLoading,  setCatalogLoading]  = useState(false);
+  const [catalogDragging, setCatalogDragging] = useState(false);
+  const catalogRef = useRef<HTMLInputElement>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     const { data, error } = await db
@@ -66,7 +73,95 @@ export default function ConfiguracionPage() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); fetchCatalogCount(); }, [load]);
+
+  async function fetchCatalogCount() {
+    const { count } = await db
+      .from("catalogo_metraje")
+      .select("codigo", { count: "exact", head: true });
+    setCatalogCount(count ?? 0);
+  }
+
+  async function uploadCatalog(file: File) {
+    setCatalogLoading(true);
+    showFlash("Leyendo catálogo…");
+    try {
+      const buf  = await file.arrayBuffer();
+      const wb   = XLSX.read(buf, { type: "array" });
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][];
+
+      // Auto-detectar columnas
+      const norm = (v: unknown) =>
+        String(v).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z0-9 ]/g, "");
+
+      let headerIdx = -1, codIdx = -1, metIdx = -1, descIdx = -1;
+      for (let i = 0; i < Math.min(20, rows.length); i++) {
+        const row = (rows[i] as unknown[]).map(norm);
+        const ci = row.findIndex(c =>
+          c === "CODIGO" || c === "COD" || c === "CODART" || c === "ITEM" ||
+          c === "SKU" || c.startsWith("COD") || c === "ARTICULO"
+        );
+        const mi = row.findIndex(c =>
+          c === "METRAJE" || c === "M2" || c === "M " || c === "METROS" ||
+          c === "AREA" || c.includes("METRO") || c.includes("METRAJE")
+        );
+        if (ci >= 0 && mi >= 0) {
+          headerIdx = i; codIdx = ci; metIdx = mi;
+          descIdx = row.findIndex((c, idx) =>
+            idx !== ci && idx !== mi && (c.startsWith("DESC") || c === "NOMBRE" || c === "PRODUCTO")
+          );
+          break;
+        }
+      }
+
+      if (headerIdx < 0 || codIdx < 0 || metIdx < 0) {
+        showFlash("⚠ No se encontraron columnas CÓDIGO y METRAJE en el archivo", false);
+        setCatalogLoading(false);
+        return;
+      }
+
+      const records: { codigo: string; metraje_por_pallet: number; descripcion?: string }[] = [];
+      for (let i = headerIdx + 1; i < rows.length; i++) {
+        const r   = rows[i] as unknown[];
+        const cod = String(r[codIdx] || "").trim();
+        const raw = parseFloat(String(r[metIdx] || "0").replace(",", ".")) || 0;
+        if (!cod || raw <= 0) continue;
+        records.push({
+          codigo:             cod.toUpperCase(),
+          metraje_por_pallet: Math.round(raw * 10000) / 10000,
+          ...(descIdx >= 0 ? { descripcion: String(r[descIdx] || "").trim() } : {}),
+        });
+      }
+
+      if (!records.length) {
+        showFlash("⚠ No se encontraron filas válidas (código + metraje > 0)", false);
+        setCatalogLoading(false);
+        return;
+      }
+
+      // Upsert en lotes de 500
+      const BATCH = 500;
+      let done = 0, errors = 0;
+      for (let i = 0; i < records.length; i += BATCH) {
+        const { error } = await db.from("catalogo_metraje")
+          .upsert(records.slice(i, i + BATCH), { onConflict: "codigo" });
+        if (error) errors++;
+        else done += Math.min(BATCH, records.length - i);
+      }
+
+      setCatalogLoading(false);
+      if (errors === 0) {
+        showFlash(`✓ Catálogo cargado: ${done} productos con metraje`);
+        fetchCatalogCount();
+      } else {
+        showFlash(`⚠ ${done} cargados, ${errors} lotes con error`, false);
+      }
+    } catch (e) {
+      setCatalogLoading(false);
+      showFlash(`❌ ${e instanceof Error ? e.message : String(e)}`, false);
+    }
+  }
 
   const showFlash = (msg: string, ok = true) => {
     setFlash({ msg, ok });
@@ -268,6 +363,40 @@ export default function ConfiguracionPage() {
             <button style={s.btnRefresh} onClick={load}>↻ Recargar</button>
           </div>
         </div>
+      </div>
+
+      {/* ── CATÁLOGO DE METRAJE ─────────────────────────────────────────── */}
+      <div
+        style={{ ...s.catalogBox, borderColor: catalogDragging ? "#f97316" : "rgba(249,115,22,0.2)", background: catalogDragging ? "rgba(249,115,22,0.04)" : "#f8fafc" }}
+        onDragOver={e => { e.preventDefault(); setCatalogDragging(true); }}
+        onDragLeave={() => setCatalogDragging(false)}
+        onDrop={e => { e.preventDefault(); setCatalogDragging(false); const f = e.dataTransfer.files[0]; if (f) uploadCatalog(f); }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, flexWrap: "wrap" as const }}>
+          <span style={{ fontSize: 18 }}>📐</span>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#0f172a", letterSpacing: 0.5 }}>
+              Catálogo de Metraje
+              {catalogCount !== null && (
+                <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: catalogCount > 0 ? "#4ade80" : "#94a3b8" }}>
+                  {catalogCount > 0 ? `✓ ${catalogCount.toLocaleString()} productos` : "Sin datos — sube el catálogo"}
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>
+              Excel con columnas <code style={{ color: "#f97316" }}>CÓDIGO</code> y <code style={{ color: "#f97316" }}>METRAJE</code> (m² por pallet) · Arrastra o haz clic en subir
+            </div>
+          </div>
+        </div>
+        <button
+          style={{ ...s.btnBulk, background: catalogLoading ? "#374151" : "#c2410c", borderColor: "transparent", opacity: catalogLoading ? 0.6 : 1, flexShrink: 0 }}
+          onClick={() => catalogRef.current?.click()}
+          disabled={catalogLoading}
+        >
+          {catalogLoading ? "⟳ Cargando…" : "↑ SUBIR CATÁLOGO"}
+        </button>
+        <input ref={catalogRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
+          onChange={e => { const f = e.target.files?.[0]; if (f) { uploadCatalog(f); e.target.value = ""; } }} />
       </div>
 
       {/* Stats */}
@@ -585,6 +714,7 @@ const s: { [k: string]: React.CSSProperties } = {
   badge: { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", marginBottom: 10 },
   title: { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#0f172a", letterSpacing: 1 },
   sub: { margin: 0, fontSize: 11, color: "#64748b" },
+  catalogBox: { border: "1px solid", borderRadius: 4, padding: "12px 16px", marginBottom: 18, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" as const, transition: "border-color .2s, background .2s" },
   btnBulk: { background: "#1d4ed8", border: "none", color: "#fff", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   btnRefresh: { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#64748b", fontSize: 11, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   statsRow: { display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" as const },
