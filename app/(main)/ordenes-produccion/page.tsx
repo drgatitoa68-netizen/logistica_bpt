@@ -61,7 +61,7 @@ export default function OrdenesProduccionPage() {
 
   useEffect(() => {
     load();
-    db.from("operadores_bodega").select("id,nombre,email,rol").eq("activo", true).order("nombre")
+    db.from("usuarios_bodega").select("id,nombre,email,rol").eq("activo", true).order("nombre")
       .then(({ data }) => setOperadores((data as Operador[]) ?? []));
 
     const dl = debounce(load, 600);

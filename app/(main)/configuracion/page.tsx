@@ -93,7 +93,7 @@ export default function ConfiguracionPage() {
 
   async function loadOperadores() {
     setOpLoading(true);
-    const { data } = await db.from("operadores_bodega")
+    const { data } = await db.from("usuarios_bodega")
       .select("id,nombre,email,rol,bodega_cedi,activo").order("nombre");
     if (data) setOperadores(data as Operador[]);
     setOpLoading(false);
@@ -101,7 +101,7 @@ export default function ConfiguracionPage() {
 
   async function agregarOperador() {
     if (!newOp.nombre.trim()) { showFlash("⚠ El nombre es obligatorio", false); return; }
-    const { error } = await db.from("operadores_bodega").insert({
+    const { error } = await db.from("usuarios_bodega").insert({
       nombre: newOp.nombre.trim().toUpperCase(),
       rol:    newOp.rol || "OPERADOR",
       email:  newOp.email.trim() || null,
@@ -115,7 +115,7 @@ export default function ConfiguracionPage() {
   }
 
   async function toggleOperador(op: Operador) {
-    const { error } = await db.from("operadores_bodega").update({ activo: !op.activo }).eq("id", op.id);
+    const { error } = await db.from("usuarios_bodega").update({ activo: !op.activo }).eq("id", op.id);
     if (!error) setOperadores(p => p.map(o => o.id === op.id ? { ...o, activo: !o.activo } : o));
     else showFlash(`❌ ${error.message}`, false);
   }
@@ -165,7 +165,7 @@ export default function ConfiguracionPage() {
       const BATCH = 200;
       let done = 0, errors = 0;
       for (let i = 0; i < records.length; i += BATCH) {
-        const { error } = await db.from("operadores_bodega")
+        const { error } = await db.from("usuarios_bodega")
           .insert(records.slice(i, i + BATCH));
         if (error) errors++;
         else done += Math.min(BATCH, records.length - i);

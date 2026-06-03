@@ -54,8 +54,8 @@ CREATE TABLE IF NOT EXISTS public.lineas_reubicacion (
   updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- ── 3. TABLA: operadores_bodega ──────────────────────────
-CREATE TABLE IF NOT EXISTS public.operadores_bodega (
+-- ── 3. TABLA: usuarios_bodega ──────────────────────────
+CREATE TABLE IF NOT EXISTS public.usuarios_bodega (
   id          UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
   email       TEXT,
   nombre      TEXT    NOT NULL,
@@ -64,12 +64,12 @@ CREATE TABLE IF NOT EXISTS public.operadores_bodega (
   activo      BOOLEAN NOT NULL DEFAULT TRUE
 );
 
-ALTER TABLE public.operadores_bodega ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "auth_all_op_bodega" ON public.operadores_bodega
+ALTER TABLE public.usuarios_bodega ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "auth_all_op_bodega" ON public.usuarios_bodega
   FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
 -- Datos iniciales (desde proyecto de referencia)
-INSERT INTO public.operadores_bodega (id, email, nombre, rol, bodega_cedi) VALUES
+INSERT INTO public.usuarios_bodega (id, email, nombre, rol, bodega_cedi) VALUES
   ('327e4140-60da-49bd-851e-8fbd9b413c0c','drgatito_a68@outlook.com','DARWIN RODRIGUEZ','JEFATURA','GR103'),
   ('49cb562f-3a95-4bbc-9e9b-9258c719613e','acumbe@graiman.com','ANDRES CUMBE FAICAN','OPERADOR','GR103'),
   ('62b14dbb-800d-491b-add3-c3ad7f6516b2','fpangol@graiman.com','NELSON FABIAN PANGOL GORDILLO','SUPERVISOR','GR103'),
