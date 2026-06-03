@@ -117,8 +117,8 @@ export async function finalizarLinea(id: string, inicioIso: string) {
 
 export async function fraccionarLinea(
   id: string,
-  f1: { pallets: number; cajas: number; cantidad_fisica: number; localizador_destino: string; subinventario_destino: string },
-  f2: { pallets: number; cajas: number; cantidad_fisica: number; localizador_destino: string; subinventario_destino: string }
+  f1: { pallets: number; cajas: number; cantidad_fisica: number; metraje: number; localizador_destino: string; subinventario_destino: string },
+  f2: { pallets: number; cajas: number; cantidad_fisica: number; metraje: number; localizador_destino: string; subinventario_destino: string }
 ) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();

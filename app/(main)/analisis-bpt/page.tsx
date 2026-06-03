@@ -414,24 +414,60 @@ try {
   setImporting(false);
 }
 }
-// ── PROCESAR: crea lineas_reubicacion desde el subinventario seleccionado ──
+// ── PROCESAR: crea lineas_reubicacion + asigna destino + calcula metraje ──
 async function procesarComoLineas() {
   const items = storedItems.filter(item => item.subinv === selectedSubInv);
   if (!items.length) { alert(`No hay ítems para ${selectedSubInv}`); return; }
   setProcesando(true);
   const now = new Date().toISOString();
-  const records = items.map(item => ({
-    descripcion:          `${item.subinv} · ${item.formato || "Sin formato"}`,
-    subinventario_origen: item.subinv,
-    localizador_origen:   item.loc,
-    lote:                 item.lote || null,
-    pallets:              item.pallets,
-    cajas:                0,
-    cantidad_fisica:      item.pallets,
-    estado:               "pendiente", // pasa por aprobación del supervisor
-    created_at:           now,
-    updated_at:           now,
-  }));
+
+  // 1. Obtener ubicaciones disponibles para asignación de destino
+  const { data: availLocs } = await db
+    .from("localizadores")
+    .select("zona,localizador,capacidad,disponible,formato")
+    .eq("activo", true)
+    .gt("disponible", 0)
+    .order("disponible", { ascending: false });
+
+  // 2. Rastrear capacidad restante por localizador durante la asignación
+  const locAvail: Record<string, number> = {};
+  for (const l of availLocs ?? []) locAvail[l.localizador] = l.disponible;
+
+  function asignarDestino(pallets: number, formato: string) {
+    const candidates = (availLocs ?? []).filter(l => (locAvail[l.localizador] ?? 0) >= pallets);
+    candidates.sort((a, b) => {
+      // Prioridad: mismo formato > Mezcla > cualquier otro
+      const score = (l: typeof a) =>
+        l.formato === formato ? 0 : l.formato === "Mezcla" ? 1 : 2;
+      return score(a) - score(b) || b.disponible - a.disponible;
+    });
+    if (!candidates.length) return null;
+    const best = candidates[0];
+    locAvail[best.localizador] = (locAvail[best.localizador] ?? 0) - pallets;
+    return best;
+  }
+
+  // 3. Construir registros con destino y metraje calculado
+  const M2 = 1.2; // m² por pallet estándar
+  const records = items.map(item => {
+    const dest = asignarDestino(item.pallets, item.formato || "");
+    return {
+      descripcion:             `${item.subinv} · ${item.formato || "Sin formato"}`,
+      subinventario_origen:    item.subinv,
+      localizador_origen:      item.loc,
+      lote:                    item.lote || null,
+      pallets:                 item.pallets,
+      cajas:                   0,
+      cantidad_fisica:         item.pallets,
+      metraje:                 Math.round(item.pallets * M2 * 100) / 100,
+      localizador_destino:     dest?.localizador ?? null,
+      subinventario_destino:   dest ? "ALMACEN" : null,
+      estado:                  "pendiente",
+      created_at:              now,
+      updated_at:              now,
+    };
+  });
+
   const BATCH = 50;
   const batches: typeof records[] = [];
   for (let i = 0; i < records.length; i += BATCH) batches.push(records.slice(i, i + BATCH));
@@ -441,7 +477,7 @@ async function procesarComoLineas() {
   setProcesando(false);
   if (errors === 0) {
     setProcesadoInfo({ count: done, subinv: selectedSubInv });
-    setImportLog(p => [...p, { msg: `✅ ${done} líneas enviadas a revisión del supervisor`, cls: "ok" }]);
+    setImportLog(p => [...p, { msg: `✅ ${done} líneas enviadas a revisión — destinos asignados automáticamente`, cls: "ok" }]);
   } else {
     setImportLog(p => [...p, { msg: `⚠ ${done} creadas, ${errors} lotes con error`, cls: "warn" }]);
   }
@@ -497,13 +533,10 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
     style={{ margin: "14px 20px 0", border: `2px dashed ${dragging ? "#2563eb" : "#2e3247"}`, borderRadius: 10, padding: "13px 18px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", background: dragging ? "rgba(37,99,235,.06)" : "transparent", transition: "border-color .2s" }}
   >
     <div style={{ fontSize: 24 }}>📂</div>
-    <div style={{ flex: 1, minWidth: 220 }}>
-      <div style={{ fontSize: 13, fontWeight: 500 }}>Subir Excel de stock o mapa de planta</div>
-      <div style={{ fontSize: 11, color: "#8b8fa8", marginTop: 3, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-        <span style={{ background: "#1e3a5f", color: "#60a5fa", padding: "1px 7px", borderRadius: 4 }}>Stock</span>
-        PALLETS (ceil) + CAJAS (cada saldo=1 pos) → ocupación real · SUBINVENTARIO → plan distribución
-        <span style={{ background: "#1a2e1a", color: "#4ade80", padding: "1px 7px", borderRadius: 4 }}>Mapa</span>
-        hoja CAL_LOC
+    <div style={{ flex: 1, minWidth: 180 }}>
+      <div style={{ fontSize: 13, fontWeight: 500 }}>Subir Excel de stock</div>
+      <div style={{ fontSize: 11, color: "#8b8fa8", marginTop: 2 }}>
+        Arrastra el archivo o haz clic para seleccionarlo
       </div>
     </div>
     <button onClick={e => { e.stopPropagation(); fileRef.current?.click(); }}

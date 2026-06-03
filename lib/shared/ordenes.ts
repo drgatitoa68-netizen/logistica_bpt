@@ -31,12 +31,19 @@ export interface Linea {
   inicio_operador?: string;
   fin_operador?: string;
   duracion_minutos?: number;
+  metraje?: number;
   es_fraccion?: boolean;
   linea_padre_id?: string;
   notas?: string;
   updated_at: string;
   created_at: string;
 }
+
+/** m² por pallet estándar (1.2m × 1.0m). Constante compartida por cliente y servidor. */
+export const M2_POR_PALLET = 1.2;
+
+/** Calcula metraje dado un número de pallets */
+export const calcMetraje = (pallets: number) => Math.round(pallets * M2_POR_PALLET * 100) / 100;
 
 export const ESTADO_COLOR: Record<
   EstadoLinea,

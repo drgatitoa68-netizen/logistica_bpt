@@ -3,6 +3,12 @@
 -- Ejecutar en: Supabase Dashboard → SQL Editor → New query
 -- ═══════════════════════════════════════════════════════
 
+-- ── MIGRACIÓN: agregar metraje a tabla existente ─────────
+-- Si la tabla ya existe, ejecuta solo este bloque:
+ALTER TABLE public.lineas_reubicacion
+  ADD COLUMN IF NOT EXISTS metraje NUMERIC(12,2);
+-- ────────────────────────────────────────────────────────
+
 -- ── 1. TABLA: localizadores ──────────────────────────────
 CREATE TABLE IF NOT EXISTS public.localizadores (
   zona          TEXT        NOT NULL,
