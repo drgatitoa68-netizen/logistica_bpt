@@ -9,6 +9,7 @@ import { getBrowserClient } from "@/lib/supabase/browser";
 const NAV = [
   { href: "/dashboard",            icon: "⊞", label: "DASHBOARD" },
   { href: "/analisis-bpt",         icon: "⬡", label: "ANÁLISIS BPT" },
+  { href: "/inventario",           icon: "📦", label: "INVENTARIO" },
   { href: "/ordenes-produccion",   icon: "📋", label: "ÓRDENES" },
   { href: "/operador",             icon: "👷", label: "OPERADOR" },
   { href: "/ubicacion-produccion", icon: "🗺", label: "UBICACIÓN" },

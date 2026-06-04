@@ -3,11 +3,29 @@ import { useEffect, useState, useRef, useCallback } from "react"; import * as XL
 import { getBrowserClient } from "@/lib/supabase/browser";
 const db = getBrowserClient();
 // ── Tipos ──────────────────────────────────────────────────────────────────
+// Forma de respuesta de /api/plan-ubicacion usada en procesarComoLineas
+interface PlanLine {
+  row_idx: number; cod_org_inv: string; codigo: string; descripcion: string;
+  subinventario_origen: string; localizador_origen: string; lote: string;
+  cantidad_fisica: number; pallets: number; cajas: number;
+  pallets_efectivos: number;
+  subinventario_destino: string; localizador_destino: string;
+  inv_pe: number; sin_espacio: boolean; is_fragment: boolean;
+}
 interface Localizador { zona: string; localizador: string; formato?: string; capacidad: number; ocupado: number; disponible: number; pct_ocupacion: number; activo?: boolean; }
-interface SubInvItem { loc: string; subinv: string; formato: string; lote: string; pallets: number; cantidad_fisica?: number; codigo?: string; descripcion?: string; cod_org_inv?: string; }
+interface SubInvItem {
+  loc: string; subinv: string; formato: string; lote: string; pallets: number;
+  cantidad_fisica?: number; codigo?: string; descripcion?: string; cod_org_inv?: string;
+  nombre_org_inv?: string; nombre_subinv?: string; um?: string; peso?: number;
+  um_peso?: string; tipo_inventario?: string; calidad?: string; marca?: string;
+  estado_inventario?: string; estado?: string; m2_x_caja?: number;
+  can_reservada?: number; dispo_reservar?: number; um_sec?: string;
+  cantidad_fisica_sec?: number; lote_status?: string;
+}
 interface Asignacion { loc: string; zona: string; palletsAsignados: number; }
 interface PlanEntry { formato: string; lote: string; palletsNeed: number; asignaciones: Asignacion[]; palletsAsignados: number; palletsRestantes: number; }
 interface TooltipData { d: Localizador; zona: string; x: number; y: number; } interface SelectedLoc { d: Localizador; zona: string; }
+interface Movimiento { codigo: string; lote: string; origen_localizador: string; origen_subinventario: string; origen_pallets: number; destino_localizador: string; destino_subinventario: string; destino_pallets: number; }
 // ── Colores ocupación ──────────────────────────────────────────────────────
 const C = { empty: "#1e293b", low: "#639922", mid: "#1D9E75", high: "#BA7517", full: "#E24B4A", over: "#7A1F1F", };
 function getColor(p: number) { if (p <= 0) return C.empty; if (p < 0.5) return C.low; if (p < 0.8) return C.mid; if (p < 1.0) return C.high; if (p < 1.1) return C.full; return C.over; }
@@ -27,6 +45,12 @@ const [sortingPlan, setSortingPlan] = useState<PlanEntry[]>([]);
 const [loadingPlan, setLoadingPlan] = useState(false);
 const [showPlan, setShowPlan] = useState(false);
 const [planFilter, setPlanFilter] = useState("");
+// Consolidación
+const [consolidacion, setConsolidacion] = useState<Movimiento[] | null>(null);
+const [loadingConsol, setLoadingConsol] = useState(false);
+const [showConsol, setShowConsol] = useState(false);
+const [umbralConsol, setUmbralConsol] = useState(2);
+const [consolFilter, setConsolFilter] = useState("");
 const [tooltip, setTooltip] = useState<TooltipData | null>(null); const [selectedLoc, setSelectedLoc] = useState<SelectedLoc | null>(null); const [viewMode, setViewMode] = useState<"map" | "table">("map");
 const [importLog, setImportLog] = useState<{ msg: string; cls: string }[]>([]); const [progress, setProgress] = useState(0); const [progressLabel, setProgressLabel] = useState(""); const [importing, setImporting] = useState(false); const [dragging, setDragging] = useState(false);
 const fileRef = useRef<HTMLInputElement>(null); const logRef = useRef<HTMLDivElement>(null);
@@ -44,10 +68,20 @@ function detectHeader(rows: unknown[][]): {
   headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number;
   cantColIdx: number; cantFisicaColIdx: number; subInvColIdx: number; formatoColIdx: number;
   loteColIdx: number; codigoColIdx: number; descColIdx: number; codOrgColIdx: number;
+  nombreOrgColIdx: number; nombreSubColIdx: number; umColIdx: number; pesoColIdx: number;
+  umPesoColIdx: number; tipoInvColIdx: number; calidadColIdx: number; marcaColIdx: number;
+  estadoInvColIdx: number; estadoColIdx: number; m2CajaColIdx: number;
+  canReservColIdx: number; dispoReservColIdx: number; umSecColIdx: number;
+  canFisSecColIdx: number; loteStatusColIdx: number;
 } {
   let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1, cajasColIdx = -1;
   let cantColIdx = -1, cantFisicaColIdx = -1, subInvColIdx = -1;
   let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1, descColIdx = -1, codOrgColIdx = -1;
+  let nombreOrgColIdx = -1, nombreSubColIdx = -1, umColIdx = -1, pesoColIdx = -1;
+  let umPesoColIdx = -1, tipoInvColIdx = -1, calidadColIdx = -1, marcaColIdx = -1;
+  let estadoInvColIdx = -1, estadoColIdx = -1, m2CajaColIdx = -1;
+  let canReservColIdx = -1, dispoReservColIdx = -1, umSecColIdx = -1;
+  let canFisSecColIdx = -1, loteStatusColIdx = -1;
 
 for (let i = 0; i < Math.min(30, rows.length); i++) {
   const row = (rows[i] as unknown[]).map(c =>
@@ -164,10 +198,38 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
       if (v && !isNaN(parseFloat(v))) { cantColIdx = ci; break; }
     }
   }
+
+  // ── Columnas extendidas (segunda pasada sobre el mismo row) ──────────
+  const usedPrimary = new Set([locColIdx, subInvColIdx, formatoColIdx, loteColIdx,
+    codOrgColIdx, codigoColIdx, descColIdx, tarimasColIdx, cajasColIdx,
+    cantFisicaColIdx, cantColIdx].filter(x => x >= 0));
+  const findExtra = (kws: string[]) => row.findIndex((c, idx) =>
+    !usedPrimary.has(idx) && kws.some(kw => c === kw || c.startsWith(kw))
+  );
+  nombreOrgColIdx   = findExtra(["NOMBRE ORG INV", "NOMBRE ORG"]);
+  nombreSubColIdx   = findExtra(["NOMBRE SUBINVENTARIO", "NOMBRE SUB INVENTARIO", "NOMBRE SUBINV"]);
+  umColIdx          = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "UM");
+  pesoColIdx        = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "PESO");
+  umPesoColIdx      = findExtra(["UM PESO"]);
+  tipoInvColIdx     = findExtra(["TIPO INVENTARIO"]);
+  calidadColIdx     = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "CALIDAD");
+  marcaColIdx       = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "MARCA");
+  estadoInvColIdx   = findExtra(["ESTADO INVENTARIO"]);
+  estadoColIdx      = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "ESTADO" && idx !== estadoInvColIdx);
+  m2CajaColIdx      = findExtra(["M2 X CAJA", "M2XCAJA", "M2 CAJA"]);
+  canReservColIdx   = findExtra(["CAN RESERVADA", "CANT RESERVADA"]);
+  dispoReservColIdx = findExtra(["DISPO RESERVAR"]);
+  umSecColIdx       = findExtra(["UM SEC"]);
+  canFisSecColIdx   = findExtra(["CAN FISICA SEC", "CANTIDAD FISICA SEC"]);
+  loteStatusColIdx  = findExtra(["LOTE STATUS", "STATUS LOTE"]);
+
   break;
 }
 return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, cantFisicaColIdx,
-         subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgColIdx };
+         subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgColIdx,
+         nombreOrgColIdx, nombreSubColIdx, umColIdx, pesoColIdx, umPesoColIdx, tipoInvColIdx,
+         calidadColIdx, marcaColIdx, estadoInvColIdx, estadoColIdx, m2CajaColIdx,
+         canReservColIdx, dispoReservColIdx, umSecColIdx, canFisSecColIdx, loteStatusColIdx };
 }
 // ── Procesar Excel ─────────────────────────────────────────────────────
 async function processExcel(file: File) { setImporting(true); setProgress(0); setProgressLabel(""); setImportLog([]);
@@ -239,7 +301,12 @@ try {
     setProgress(8);
 
     log("⟳ Detectando estructura del archivo…");
-    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, cantFisicaColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgColIdx } = detectHeader(rows);
+    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, cantFisicaColIdx,
+            subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgColIdx,
+            nombreOrgColIdx, nombreSubColIdx, umColIdx, pesoColIdx, umPesoColIdx, tipoInvColIdx,
+            calidadColIdx, marcaColIdx, estadoInvColIdx, estadoColIdx, m2CajaColIdx,
+            canReservColIdx, dispoReservColIdx, umSecColIdx, canFisSecColIdx, loteStatusColIdx,
+          } = detectHeader(rows);
 
     if (headerRowIdx < 0 || locColIdx < 0) {
       const preview = rows.slice(0, 8).map((r, i) =>
@@ -309,7 +376,19 @@ try {
           subInvSet.add(si);
           if (!bySubInv[si]) bySubInv[si] = {};
           bySubInv[si][loc] = (bySubInv[si][loc] ?? 0) + pallets;
-          subInvItems.push({ loc, subinv: si, formato: fmt, lote: lot, pallets, cantidad_fisica: canFis || undefined, codigo: cod, descripcion: desc, cod_org_inv: codOrg });
+          const str = (ci: number) => ci >= 0 ? String(r[ci] || "").trim() || undefined : undefined;
+          const num = (ci: number) => ci >= 0 ? parseFloat(String(r[ci] || "").replace(",", ".")) || undefined : undefined;
+          subInvItems.push({
+            loc, subinv: si, formato: fmt, lote: lot, pallets,
+            cantidad_fisica: canFis || undefined, codigo: cod, descripcion: desc, cod_org_inv: codOrg,
+            nombre_org_inv: str(nombreOrgColIdx), nombre_subinv: str(nombreSubColIdx),
+            um: str(umColIdx), peso: num(pesoColIdx), um_peso: str(umPesoColIdx),
+            tipo_inventario: str(tipoInvColIdx), calidad: str(calidadColIdx), marca: str(marcaColIdx),
+            estado_inventario: str(estadoInvColIdx), estado: str(estadoColIdx),
+            m2_x_caja: num(m2CajaColIdx), can_reservada: num(canReservColIdx),
+            dispo_reservar: num(dispoReservColIdx), um_sec: str(umSecColIdx),
+            cantidad_fisica_sec: num(canFisSecColIdx), lote_status: str(loteStatusColIdx),
+          });
         }
       }
     }
@@ -403,6 +482,55 @@ try {
       setProgressLabel(`Actualizando BD… ${done}/${updates.length}`);
     }
 
+    // ── PASO 5b: upsert a inventario via RPC + recalcular ocupación ──
+    if (subInvItems.length > 0) {
+      log("⟳ Actualizando tabla inventario…");
+      const bySubInvGroups = new Map<string, typeof subInvItems>();
+      for (const item of subInvItems) {
+        if (!item.subinv) continue;
+        if (!bySubInvGroups.has(item.subinv)) bySubInvGroups.set(item.subinv, []);
+        bySubInvGroups.get(item.subinv)!.push(item);
+      }
+      for (const [si, siItems] of bySubInvGroups) {
+        const rows = siItems
+          .filter(item => dbMap[item.loc.toUpperCase()])
+          .map(item => ({
+            codigo:              item.codigo            || "",
+            lote:                item.lote              || null,
+            localizador:         item.loc,
+            subinventario:       item.subinv,
+            descripcion:         item.descripcion       || null,
+            pallets:             item.pallets,
+            cajas:               0,
+            cantidad_fisica:     item.cantidad_fisica   ?? null,
+            formato:             item.formato           || null,
+            cod_org_inv:         item.cod_org_inv       || null,
+            nombre_org_inv:      item.nombre_org_inv    || null,
+            nombre_subinv:       item.nombre_subinv     || null,
+            um:                  item.um                || null,
+            peso:                item.peso              ?? null,
+            um_peso:             item.um_peso           || null,
+            tipo_inventario:     item.tipo_inventario   || null,
+            calidad:             item.calidad           || null,
+            marca:               item.marca             || null,
+            estado_inventario:   item.estado_inventario || null,
+            estado:              item.estado            || null,
+            m2_x_caja:          item.m2_x_caja         ?? null,
+            can_reservada:       item.can_reservada     ?? null,
+            dispo_reservar:      item.dispo_reservar    ?? null,
+            um_sec:              item.um_sec            || null,
+            cantidad_fisica_sec: item.cantidad_fisica_sec ?? null,
+            lote_status:         item.lote_status       || null,
+          }));
+        const { error: rpcErr } = await db.rpc("importar_subinventario", {
+          p_subinventario: si,
+          p_rows: rows,
+        });
+        if (rpcErr) throw new Error(`importar_subinventario ${si}: ${rpcErr.message}`);
+        log(`✅ Inventario actualizado: ${si} (${rows.length} registros)`, "ok");
+      }
+    }
+
     // ── PASO 6: guardar subinventarios en estado ──────────────────
     if (Object.keys(bySubInv).length > 0) {
       const normalizedBySubInv: Record<string, Record<string, number>> = {};
@@ -476,96 +604,125 @@ try {
   setImporting(false);
 }
 }
-// ── PROCESAR: crea lineas_reubicacion + asigna destino + calcula metraje ──
+// ── PROCESAR: crea lineas_reubicacion usando /api/plan-ubicacion ──────────
 async function procesarComoLineas() {
   const items = storedItems.filter(item => item.subinv === selectedSubInv);
   if (!items.length) { alert(`No hay ítems para ${selectedSubInv}`); return; }
   setProcesando(true);
   const now = new Date().toISOString();
 
-  // 1. Obtener ubicaciones disponibles para asignación de destino
-  const { data: availLocs } = await db
-    .from("localizadores")
-    .select("zona,localizador,capacidad,disponible,formato")
-    .eq("activo", true)
-    .gt("disponible", 0)
-    .order("disponible", { ascending: false });
+  try {
+    // 1. Catálogo de metraje (incluye __DEFAULT__ como fallback sin magic number)
+    const { data: catalogData } = await db
+      .from("catalogo_metraje")
+      .select("codigo,metraje_por_pallet");
+    const catalogMap: Record<string, number> = {};
+    for (const c of catalogData ?? []) {
+      catalogMap[(c.codigo || "").toUpperCase().trim()] = Number(c.metraje_por_pallet);
+    }
+    const M2_DEFAULT = catalogMap["__DEFAULT__"] ?? 1.2;
 
-  // 2. Rastrear capacidad restante por localizador durante la asignación
-  const locAvail: Record<string, number> = {};
-  for (const l of availLocs ?? []) locAvail[l.localizador] = l.disponible;
+    // 2. Ubicaciones activas (R3 ya filtrado aquí; R1/R2/R4 los maneja la API)
+    const { data: availLocs } = await db
+      .from("localizadores")
+      .select("zona,localizador,capacidad,ocupado,disponible,formato,activo")
+      .eq("activo", true);
 
-  function asignarDestino(pallets: number, formato: string) {
-    const candidates = (availLocs ?? []).filter(l => (locAvail[l.localizador] ?? 0) >= pallets);
-    candidates.sort((a, b) => {
-      // Prioridad: mismo formato > Mezcla > cualquier otro
-      const score = (l: typeof a) =>
-        l.formato === formato ? 0 : l.formato === "Mezcla" ? 1 : 2;
-      return score(a) - score(b) || b.disponible - a.disponible;
+    // 3. Mapear SubInvItem → StockItem y llamar al motor único /api/plan-ubicacion
+    const stockItems = items.map((item, idx) => ({
+      row_idx:               idx,
+      cod_org_inv:           item.cod_org_inv  || "",
+      codigo:                item.codigo       || "",
+      descripcion:           item.descripcion  || `${item.subinv} · ${item.formato || "Sin formato"}`,
+      subinventario_origen:  item.subinv,
+      localizador_origen:    item.loc,
+      lote:                  item.lote         || "",
+      cantidad_fisica:       item.cantidad_fisica || item.pallets,
+      pallets:               item.pallets,
+      cajas:                 0,
+      responsable:           "",
+      conteo:                null,
+      formato:               item.formato      || "",
+    }));
+
+    const resp = await fetch("/api/plan-ubicacion", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: stockItems, locations: availLocs || [] }),
     });
-    if (!candidates.length) return null;
-    const best = candidates[0];
-    locAvail[best.localizador] = (locAvail[best.localizador] ?? 0) - pallets;
-    return best;
+    const { ok: planOk, plan, error: planErr } = await resp.json();
+    if (!planOk) throw new Error(planErr ?? "Error en /api/plan-ubicacion");
+
+    // 4. Construir registros para lineas_reubicacion
+    const records = (plan as PlanLine[]).map(line => {
+      const codKey = (line.codigo || "").toUpperCase().trim();
+      const m2Unit = catalogMap[codKey] || M2_DEFAULT;
+      const metraje = line.cantidad_fisica && line.cantidad_fisica > 0
+        ? Math.round(line.cantidad_fisica * 100) / 100
+        : Math.round(line.pallets * m2Unit * 100) / 100;
+
+      return {
+        cod_org_inv:           line.cod_org_inv  || null,
+        codigo:                line.codigo       || null,
+        descripcion:           line.descripcion,
+        subinventario_origen:  line.subinventario_origen,
+        localizador_origen:    line.localizador_origen,
+        lote:                  line.lote || null,
+        pallets:               line.pallets,
+        cajas:                 0,
+        cantidad_fisica:       line.cantidad_fisica || line.pallets,
+        metraje,
+        localizador_destino:   line.sin_espacio ? null : line.localizador_destino,
+        subinventario_destino: line.sin_espacio ? null : line.subinventario_destino,
+        estado:                "pendiente",
+        created_at:            now,
+        updated_at:            now,
+      };
+    });
+
+    // 5. Insertar en lotes
+    const BATCH = 50;
+    const batches: typeof records[] = [];
+    for (let i = 0; i < records.length; i += BATCH) batches.push(records.slice(i, i + BATCH));
+    const results = await Promise.all(batches.map(b => db.from("lineas_reubicacion").insert(b)));
+    let done = 0, errors = 0;
+    results.forEach((r, i) => { if (r.error) errors++; else done += batches[i].length; });
+
+    if (errors === 0) {
+      setProcesadoInfo({ count: done, subinv: selectedSubInv });
+      setImportLog(p => [...p, { msg: `✅ ${done} líneas enviadas a revisión — destinos asignados por /api/plan-ubicacion`, cls: "ok" }]);
+    } else {
+      setImportLog(p => [...p, { msg: `⚠ ${done} creadas, ${errors} lotes con error`, cls: "warn" }]);
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    setImportLog(p => [...p, { msg: `❌ ${msg}`, cls: "err" }]);
+  } finally {
+    setProcesando(false);
   }
-
-  // 3. Cargar catálogo de metraje por código de producto
-  const { data: catalogData } = await db
-    .from("catalogo_metraje")
-    .select("codigo,metraje_por_pallet");
-
-  const catalogMap: Record<string, number> = {};
-  for (const c of catalogData ?? []) {
-    catalogMap[(c.codigo || "").toUpperCase().trim()] = Number(c.metraje_por_pallet);
-  }
-  const hasCatalog = Object.keys(catalogMap).length > 0;
-
-  // 4. Construir registros con destino y metraje calculado
-  const M2_DEFAULT = 1.2; // fallback m²/pallet si no está en catálogo
-  const records = items.map(item => {
-    const dest   = asignarDestino(item.pallets, item.formato || "");
-    const codKey = (item.codigo || "").toUpperCase().trim();
-    const m2Unit = (hasCatalog && codKey && catalogMap[codKey]) ? catalogMap[codKey] : M2_DEFAULT;
-
-    // Metraje: prioridad → Can Física del Excel (M2) → catálogo por código → 1.2 m²/pallet
-    const metraje = item.cantidad_fisica && item.cantidad_fisica > 0
-      ? Math.round(item.cantidad_fisica * 100) / 100
-      : Math.round(item.pallets * m2Unit * 100) / 100;
-
-    return {
-      cod_org_inv:             item.cod_org_inv  || null,
-      codigo:                  item.codigo       || null,
-      descripcion:             item.descripcion  || `${item.subinv} · ${item.formato || "Sin formato"}`,
-      subinventario_origen:    item.subinv,
-      localizador_origen:      item.loc,
-      lote:                    item.lote || null,
-      pallets:                 item.pallets,
-      cajas:                   0,
-      cantidad_fisica:         item.cantidad_fisica || item.pallets,
-      metraje,
-      localizador_destino:     dest?.localizador ?? null,
-      subinventario_destino:   dest?.zona        ?? null,
-      estado:                  "pendiente",
-      created_at:              now,
-      updated_at:              now,
-    };
-  });
-
-  const BATCH = 50;
-  const batches: typeof records[] = [];
-  for (let i = 0; i < records.length; i += BATCH) batches.push(records.slice(i, i + BATCH));
-  const results = await Promise.all(batches.map(b => db.from("lineas_reubicacion").insert(b)));
-  let done = 0, errors = 0;
-  results.forEach((r, i) => { if (r.error) errors++; else done += batches[i].length; });
-  setProcesando(false);
-  if (errors === 0) {
-    setProcesadoInfo({ count: done, subinv: selectedSubInv });
-    setImportLog(p => [...p, { msg: `✅ ${done} líneas enviadas a revisión — destinos asignados automáticamente`, cls: "ok" }]);
-  } else {
-    setImportLog(p => [...p, { msg: `⚠ ${done} creadas, ${errors} lotes con error`, cls: "warn" }]);
+}
+// ── Consolidación ──────────────────────────────────────────────────────
+async function loadConsolidacion() {
+  setLoadingConsol(true);
+  try {
+    const resp = await fetch(`/api/analisis-bpt/consolidacion?umbral=${umbralConsol}`);
+    const { ok, movimientos, error: err } = await resp.json();
+    if (!ok) throw new Error(err);
+    setConsolidacion(movimientos);
+    setShowConsol(true);
+  } catch (e: unknown) {
+    setImportLog(p => [...p, { msg: `⚠ Consolidación: ${e instanceof Error ? e.message : String(e)}`, cls: "warn" }]);
+  } finally {
+    setLoadingConsol(false);
   }
 }
 // ── Datos para render ──────────────────────────────────────────────────
+const consolFiltrado = !consolFilter
+  ? (consolidacion ?? [])
+  : (consolidacion ?? []).filter(m =>
+      m.codigo.includes(consolFilter) || m.lote.includes(consolFilter) ||
+      m.origen_localizador.includes(consolFilter) || m.destino_localizador.includes(consolFilter)
+    );
 const zonasRender = fZone === "all" ? Object.keys(allData) : [fZone].filter(z => allData[z]);
 const allLocsFlat = allLocs .filter(d => matchFilter(d.pct_ocupacion) && (fZone === "all" || d.zona === fZone) && (!fSearch || d.localizador.toUpperCase().includes(fSearch.toUpperCase())) ) .sort((a, b) => a.zona.localeCompare(b.zona) || a.localizador.localeCompare(b.localizador));
 const leyenda = selectedSubInv === "all" ? [ { c: C.empty, l: "Vacío" }, { c: C.low, l: "<50%" }, { c: C.mid, l: "50–80%" }, { c: C.high, l: "81–99%" }, { c: C.full, l: "100%" }, { c: C.over, l: ">110%" }, ] : [ { c: S.available, l: "Libre (disponible)" }, { c: S.hasSubInv, l: `Tiene ${selectedSubInv}` }, { c: S.otherOcup, l: "Ocupado por otros" }, { c: S.full, l: "Exceso" }, ];
@@ -851,6 +1008,87 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
         )}
       </div>
     )}
+
+    {/* ── PANEL CONSOLIDACIÓN ─────────────────────────────────────── */}
+    <div style={{ background: "#0d1a0d", border: "1px solid #166534", borderRadius: 10, marginBottom: 12, overflow: "hidden" }}>
+      <div style={{ background: "#1a2e1a", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 16 }}>🔀</span>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#86efac" }}>Consolidación de Stock</div>
+            <div style={{ fontSize: 11, color: "#4ade80", marginTop: 1 }}>Lotes dispersos con saldo bajo → mover al localizador principal</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ fontSize: 11, color: "#86efac" }}>Umbral:</label>
+          <input type="number" min={1} max={20} value={umbralConsol}
+            onChange={e => setUmbralConsol(Number(e.target.value))}
+            style={{ width: 52, fontSize: 12, padding: "4px 6px", border: "1px solid #166534", borderRadius: 5, background: "#0f1117", color: "#e8eaf0", outline: "none" }} />
+          <span style={{ fontSize: 11, color: "#4ade80" }}>pallets</span>
+          <button onClick={loadConsolidacion} disabled={loadingConsol}
+            style={{ padding: "5px 14px", fontSize: 12, border: "none", borderRadius: 6, background: loadingConsol ? "#374151" : "#16a34a", color: "#fff", cursor: loadingConsol ? "wait" : "pointer", fontWeight: 600 }}>
+            {loadingConsol ? "⟳ Calculando…" : "Calcular"}
+          </button>
+          {consolidacion !== null && (
+            <button onClick={() => setShowConsol(v => !v)}
+              style={{ padding: "5px 12px", fontSize: 12, border: "1px solid #166534", borderRadius: 6, background: showConsol ? "#166534" : "transparent", color: "#86efac", cursor: "pointer" }}>
+              {showConsol ? "Ocultar" : `Ver ${consolidacion.length} movimientos`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {consolidacion !== null && !loadingConsol && (
+        <div style={{ padding: "10px 16px" }}>
+          {/* Stats */}
+          <div style={{ display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
+            {[
+              { v: consolidacion.length,                                                            l: "Movimientos" },
+              { v: new Set(consolidacion.map(m => `${m.codigo}|||${m.lote}`)).size,                l: "Lotes únicos" },
+              { v: consolidacion.reduce((s, m) => s + m.origen_pallets, 0),                        l: "Pallets a mover" },
+            ].map(s => (
+              <div key={s.l} style={{ background: "#0f1117", borderRadius: 7, padding: "8px 14px" }}>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#4ade80" }}>{s.v}</div>
+                <div style={{ fontSize: 10, color: "#8b8fa8" }}>{s.l}</div>
+              </div>
+            ))}
+            <input value={consolFilter} onChange={e => setConsolFilter(e.target.value.toUpperCase())}
+              placeholder="Filtrar código / lote / loc…"
+              style={{ fontSize: 11, padding: "5px 10px", border: "1px solid #166534", borderRadius: 6, background: "#0f1117", color: "#e8eaf0", outline: "none", marginLeft: "auto", width: 210 }} />
+          </div>
+
+          {showConsol && (
+            <div style={{ maxHeight: 420, overflowY: "auto", border: "1px solid #1a3a1a", borderRadius: 8, overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ background: "#1a2e1a", position: "sticky", top: 0 }}>
+                    {["Código","Lote","Origen","Plt","→","Destino","Plt destino"].map(h => (
+                      <th key={h} style={{ padding: "7px 10px", textAlign: "left", color: "#86efac", fontWeight: 600, whiteSpace: "nowrap", borderBottom: "1px solid #166534" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {consolFiltrado.map((m, i) => (
+                    <tr key={i} style={{ borderBottom: "1px solid #1a2e1a", background: i % 2 === 0 ? "transparent" : "#111a11" }}>
+                      <td style={{ padding: "5px 10px", fontWeight: 600, color: "#e8eaf0" }}>{m.codigo}</td>
+                      <td style={{ padding: "5px 10px", color: "#93c5fd" }}>{m.lote}</td>
+                      <td style={{ padding: "5px 10px", color: "#f87171", fontFamily: "monospace" }}>{m.origen_localizador}</td>
+                      <td style={{ padding: "5px 10px", color: "#f87171", fontWeight: 700 }}>{m.origen_pallets}</td>
+                      <td style={{ padding: "5px 10px", color: "#5a5e75", textAlign: "center" }}>→</td>
+                      <td style={{ padding: "5px 10px", color: "#4ade80", fontFamily: "monospace" }}>{m.destino_localizador}</td>
+                      <td style={{ padding: "5px 10px", color: "#4ade80", fontWeight: 700 }}>{m.destino_pallets}</td>
+                    </tr>
+                  ))}
+                  {consolFiltrado.length === 0 && (
+                    <tr><td colSpan={7} style={{ padding: 24, textAlign: "center", color: "#5a5e75" }}>Sin resultados para el filtro</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
 
     {/* Toolbar */}
     <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface StockItem {
@@ -14,6 +15,7 @@ export interface StockItem {
   cajas: number;
   responsable: string;
   conteo: number | null;
+  formato?: string;      // campo explícito para R1 (viene de analisis-bpt o ubicacion-produccion)
 }
 
 export interface LocationIn {
@@ -23,6 +25,7 @@ export interface LocationIn {
   capacidad: number;
   ocupado: number;
   disponible: number;
+  activo?: boolean;
 }
 
 export interface AssignedLine extends StockItem {
@@ -34,24 +37,6 @@ export interface AssignedLine extends StockItem {
   is_fragment: boolean;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/** Extract tile dimension (e.g. "59X59", "29X59", "30X60") from a description. */
-function extractDim(desc: string): string {
-  const m = desc.match(/(\d+)\s*[xX×]\s*(\d+)/);
-  if (!m) return "";
-  return `${m[1]}X${m[2]}`;
-}
-
-/** Returns true if a localizador's formato is compatible with the product's dimension. */
-function dimMatch(locFormato: string, itemDim: string): boolean {
-  if (!locFormato || !itemDim) return false;
-  const lf = locFormato.toUpperCase().replace(/\s+/g, "");
-  if (lf === "MEZCLA" || lf === "MIX" || lf === "") return false;
-  const id = itemDim.toUpperCase();
-  return lf.includes(id) || id.includes(lf) || lf === id;
-}
-
 // ── Mutable location state ────────────────────────────────────────────────────
 interface LocState {
   zona: string;
@@ -59,53 +44,67 @@ interface LocState {
   formato: string;
   capacidad: number;
   originalOcupado: number;
-  remaining: number;       // mutable: pallets still available
-  assignedHere: number;    // mutable: cumulative pallets we put here in this plan
+  remaining: number;
+  assignedHere: number;
 }
 
-// ── Core algorithm ────────────────────────────────────────────────────────────
-/**
- * Improved greedy placement algorithm with:
- *  - Lot-level consolidation (same código+lote stays together if possible)
- *  - Format/dimension matching bonus
- *  - Zone consistency (same product tends to same zone)
- *  - Cumulative INV-PE tracking per localizador
- *  - Fragment detection (warns when a lot must be split)
- *
- * Equivalent Python implementation would use the same scoring logic with
- * scipy.optimize or PuLP for an LP formulation; the greedy approach here
- * achieves near-optimal results for typical warehouse datasets.
- */
-function computePlan(items: StockItem[], locations: LocationIn[]): AssignedLine[] {
-  // Build mutable pool (only locations with free space)
+// ── R1: formato del localizador acepta el formato del producto ────────────────
+// VACIO / MEZCLA / MIX → acepta cualquier formato
+function r1FormatoOk(locFormato: string, itemFormato: string): boolean {
+  const lf  = locFormato.toUpperCase().trim();
+  const itf = itemFormato.toUpperCase().trim();
+  if (!lf || lf === "MEZCLA" || lf === "MIX") return true;   // localizador comodín
+  if (!itf) return true;                                        // ítem sin formato → no filtrar
+  return lf === itf;
+}
+
+// ── R4: score para elegir MAX ─────────────────────────────────────────────────
+// +1000 si el localizador ya tiene este lote; minimiza espacio desperdiciado
+function scoreR4(
+  loc: LocState,
+  pallets: number,
+  locLoteKey: string,           // `${loc.localizador}|||${codigo}|||${lote}`
+  existingLots: Set<string>,
+): number {
+  const hasLote = existingLots.has(locLoteKey) ? 1000 : 0;
+  return hasLote - (loc.remaining - pallets);
+}
+
+// ── Core algorithm (4 reglas) ─────────────────────────────────────────────────
+function computePlan(
+  items: StockItem[],
+  locations: LocationIn[],
+  existingLots: Set<string>,     // `${localizador}|||${codigo}|||${lote}`
+): AssignedLine[] {
+
+  // Pool: R3 — solo localizadores activos con espacio
   const pool = new Map<string, LocState>();
   for (const loc of locations) {
-    const free = loc.disponible ?? 0;
-    if (free > 0) {
-      pool.set(loc.localizador, {
-        zona: loc.zona,
-        localizador: loc.localizador,
-        formato: (loc.formato ?? "").toUpperCase(),
-        capacidad: loc.capacidad,
-        originalOcupado: loc.ocupado,
-        remaining: free,
-        assignedHere: 0,
-      });
-    }
+    if (loc.activo === false) continue;           // R3
+    if ((loc.disponible ?? 0) <= 0) continue;
+    pool.set(loc.localizador, {
+      zona:            loc.zona,
+      localizador:     loc.localizador,
+      formato:         (loc.formato ?? "").toUpperCase().trim(),
+      capacidad:       loc.capacidad,
+      originalOcupado: loc.ocupado ?? 0,
+      remaining:       loc.disponible,
+      assignedHere:    0,
+    });
   }
 
-  // Lot grouping: code+lote → total effective pallets
-  interface LotGroup { codigo: string; lote: string; dim: string; totalPallets: number; items: StockItem[]; }
+  // Agrupar ítems por código+lote para priorizar los más grandes
+  interface LotGroup { codigo: string; lote: string; formato: string; totalPallets: number; items: StockItem[]; }
   const lotMap = new Map<string, LotGroup>();
   for (const item of items) {
     const key = `${item.codigo}|||${item.lote}`;
     if (!lotMap.has(key)) {
       lotMap.set(key, {
-        codigo: item.codigo,
-        lote: item.lote,
-        dim: extractDim(item.descripcion),
+        codigo:       item.codigo,
+        lote:         item.lote,
+        formato:      (item.formato ?? "").toUpperCase().trim(),
         totalPallets: 0,
-        items: [],
+        items:        [],
       });
     }
     const g = lotMap.get(key)!;
@@ -113,129 +112,104 @@ function computePlan(items: StockItem[], locations: LocationIn[]): AssignedLine[
     g.totalPallets += item.pallets + (item.cajas > 0 ? 1 : 0);
   }
 
-  // Sort lots: most pallets first (largest needs get first pick of space)
+  // Lotes más grandes primero
   const lotGroups = [...lotMap.values()].sort((a, b) => b.totalPallets - a.totalPallets);
 
-  // Tracking maps for scoring
-  const productZone = new Map<string, Map<string, number>>(); // codigo → zona → assigned_pallets
-  const locCodes    = new Map<string, Set<string>>();          // localizador → Set<codigo>
-
-  function score(loc: LocState, group: LotGroup, needed: number): number {
-    let s = 0;
-
-    // Can fit the whole remaining need without splitting? Big bonus.
-    if (loc.remaining >= needed) s += 50;
-
-    // Dimension/format match
-    if (group.dim && dimMatch(loc.formato, group.dim)) s += 45;
-
-    // Same product code already stored here
-    if (locCodes.get(loc.localizador)?.has(group.codigo)) s += 70;
-
-    // Zone already used for this product code
-    const zm = productZone.get(group.codigo);
-    if (zm) {
-      const zc = zm.get(loc.zona) ?? 0;
-      if (zc > 0) s += 30 + Math.min(zc, 20); // up to +50 for high-affinity zone
-    }
-
-    // Prefer higher utilization after assignment (pack densely, leave whole empty ones free)
-    const take = Math.min(loc.remaining, needed);
-    const utilAfter = loc.capacidad > 0
-      ? (loc.originalOcupado + loc.assignedHere + take) / loc.capacidad
-      : 0;
-    s += Math.min(utilAfter, 1.0) * 15;
-
-    // Small penalty for already heavily used locations near overflow
-    if (utilAfter > 0.95) s -= 10;
-
-    return s;
-  }
-
-  // Assign items lot by lot
   const result: AssignedLine[] = [];
 
   for (const group of lotGroups) {
     for (const item of group.items) {
-      const effPallets = item.pallets + (item.cajas > 0 ? 1 : 0);
+      const effPallets  = item.pallets + (item.cajas > 0 ? 1 : 0);
+      const itemFormato = group.formato;
 
       if (effPallets === 0) {
         result.push({ ...item, pallets_efectivos: 0, subinventario_destino: "", localizador_destino: "SIN PALLETS", inv_pe: 0, sin_espacio: false, is_fragment: false });
         continue;
       }
 
-      let remaining  = effPallets;
-      let isFirst    = true;
+      // ── Intento sin fragmentar (R1 + R2 + R4) ────────────────────────────
+      const fullFit = [...pool.values()].filter(loc =>
+        r1FormatoOk(loc.formato, itemFormato) &&   // R1
+        loc.remaining >= effPallets                  // R2: cabe entero
+      );
 
-      while (remaining > 0) {
-        const avail = [...pool.values()].filter(l => l.remaining > 0);
-        if (!avail.length) break;
-
-        const best = avail.reduce((best, loc) => {
-          const s = score(loc, group, remaining);
-          return s > score(best, group, remaining) ? loc : best;
+      if (fullFit.length > 0) {
+        const best = fullFit.reduce((best, loc) => {
+          const lk = `${loc.localizador}|||${item.codigo}|||${item.lote}`;
+          const bk = `${best.localizador}|||${item.codigo}|||${item.lote}`;
+          return scoreR4(loc, effPallets, lk, existingLots) >
+                 scoreR4(best, effPallets, bk, existingLots) ? loc : best;
         });
 
-        const take = Math.min(best.remaining, remaining);
+        best.remaining    -= effPallets;
+        best.assignedHere += effPallets;
+
+        result.push({
+          ...item,
+          pallets_efectivos:     effPallets,
+          subinventario_destino: best.zona,
+          localizador_destino:   best.localizador,
+          inv_pe:                best.originalOcupado + best.assignedHere,
+          sin_espacio:           false,
+          is_fragment:           false,
+        });
+        continue;
+      }
+
+      // ── Fragmentación: R1 + cualquier espacio disponible ─────────────────
+      let remaining = effPallets;
+      let isFirst   = true;
+
+      while (remaining > 0) {
+        const fragPool = [...pool.values()].filter(loc =>
+          r1FormatoOk(loc.formato, itemFormato) && loc.remaining > 0
+        );
+        if (!fragPool.length) break;
+
+        const best = fragPool.reduce((best, loc) => {
+          const take   = Math.min(loc.remaining, remaining);
+          const bestTk = Math.min(best.remaining, remaining);
+          const lk  = `${loc.localizador}|||${item.codigo}|||${item.lote}`;
+          const bk  = `${best.localizador}|||${item.codigo}|||${item.lote}`;
+          return scoreR4(loc, take, lk, existingLots) >
+                 scoreR4(best, bestTk, bk, existingLots) ? loc : best;
+        });
+
+        const take     = Math.min(best.remaining, remaining);
         best.remaining    -= take;
         best.assignedHere += take;
 
-        // Update tracking
-        if (!locCodes.has(best.localizador)) locCodes.set(best.localizador, new Set());
-        locCodes.get(best.localizador)!.add(group.codigo);
+        result.push({
+          ...item,
+          pallets:               isFirst ? item.pallets : take,
+          cajas:                 isFirst ? item.cajas : 0,
+          pallets_efectivos:     isFirst ? effPallets : take,
+          subinventario_destino: best.zona,
+          localizador_destino:   best.localizador,
+          inv_pe:                best.originalOcupado + best.assignedHere,
+          sin_espacio:           false,
+          is_fragment:           !isFirst,
+        });
 
-        if (!productZone.has(group.codigo)) productZone.set(group.codigo, new Map());
-        const zm = productZone.get(group.codigo)!;
-        zm.set(best.zona, (zm.get(best.zona) ?? 0) + take);
-
-        // INV-PE = original occupancy + ALL pallets assigned to this location in this plan
-        const inv_pe = best.originalOcupado + best.assignedHere;
-
-        if (isFirst) {
-          result.push({
-            ...item,
-            pallets_efectivos: effPallets,
-            subinventario_destino: best.zona,
-            localizador_destino: best.localizador,
-            inv_pe,
-            sin_espacio: false,
-            is_fragment: false,
-          });
-          isFirst = false;
-        } else {
-          // Fragment: same item split into an additional location
-          result.push({
-            ...item,
-            pallets: take,
-            cajas: 0,
-            pallets_efectivos: take,
-            subinventario_destino: best.zona,
-            localizador_destino: best.localizador,
-            inv_pe,
-            sin_espacio: false,
-            is_fragment: true,
-          });
-        }
-
+        isFirst   = false;
         remaining -= take;
       }
 
-      // Couldn't place at all (no space in warehouse)
+      // Sin espacio en absoluto
       if (remaining > 0 && isFirst) {
         result.push({
           ...item,
-          pallets_efectivos: effPallets,
+          pallets_efectivos:     effPallets,
           subinventario_destino: "",
-          localizador_destino: "SIN ESPACIO",
-          inv_pe: 0,
-          sin_espacio: true,
-          is_fragment: false,
+          localizador_destino:   "SIN ESPACIO",
+          inv_pe:                0,
+          sin_espacio:           true,
+          is_fragment:           false,
         });
       }
     }
   }
 
-  // Restore original row order
   result.sort((a, b) => a.row_idx - b.row_idx || (a.is_fragment ? 1 : -1));
   return result;
 }
@@ -251,15 +225,36 @@ export async function POST(req: NextRequest) {
     if (!Array.isArray(items) || !Array.isArray(locations)) {
       return NextResponse.json(
         { ok: false, error: "items y locations deben ser arrays" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const plan = computePlan(items as StockItem[], locations as LocationIn[]);
+    // Consultar inventario actual para R4 (yaTieneLote)
+    let existingLots = new Set<string>();
+    try {
+      const sb = await createClient();
+      const { data: invRows } = await sb
+        .from("inventario")
+        .select("localizador,codigo,lote")
+        .not("lote", "is", null);
+      for (const row of invRows ?? []) {
+        if (row.localizador && row.codigo && row.lote) {
+          existingLots.add(`${row.localizador}|||${row.codigo}|||${row.lote}`);
+        }
+      }
+    } catch {
+      // inventario puede no existir aún; continuar sin bonus R4
+    }
+
+    const plan = computePlan(
+      items as StockItem[],
+      locations as LocationIn[],
+      existingLots,
+    );
 
     const sinEspacio = plan.filter(l => l.sin_espacio).length;
     const fragmentos = plan.filter(l => l.is_fragment).length;
-    const asignados  = plan.filter(l => !l.sin_espacio).length;
+    const asignados  = plan.filter(l => !l.sin_espacio && !l.is_fragment).length;
 
     return NextResponse.json({
       ok: true,
