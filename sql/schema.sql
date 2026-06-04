@@ -6,6 +6,11 @@
 -- ── MIGRACIONES (si las tablas ya existen) ──────────────
 ALTER TABLE public.lineas_reubicacion
   ADD COLUMN IF NOT EXISTS metraje NUMERIC(12,2);
+
+ALTER TABLE public.catalogo_metraje
+  ADD COLUMN IF NOT EXISTS cajas_por_pallet NUMERIC(8,2),
+  ADD COLUMN IF NOT EXISTS m2_x_caja        NUMERIC(8,4),
+  ADD COLUMN IF NOT EXISTS linea_negocio    TEXT;
 -- ────────────────────────────────────────────────────────
 
 -- ── 1. TABLA: localizadores ──────────────────────────────
@@ -80,8 +85,12 @@ ON CONFLICT (id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS public.catalogo_metraje (
   codigo             TEXT         PRIMARY KEY,
   descripcion        TEXT,
-  metraje_por_pallet NUMERIC(8,4) NOT NULL DEFAULT 1.2,
-  updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  linea_negocio      TEXT,
+  cajas_por_pallet   NUMERIC(8,2),
+  m2_x_caja          NUMERIC(8,4),
+  m2_x_pe            NUMERIC(8,4),
+  formato            TEXT,
+  metraje_por_pallet NUMERIC(8,4) NOT NULL DEFAULT 1.2
 );
 
 ALTER TABLE public.catalogo_metraje ENABLE ROW LEVEL SECURITY;

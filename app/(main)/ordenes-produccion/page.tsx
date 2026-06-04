@@ -5,6 +5,7 @@ import { getBrowserClient } from "@/lib/supabase/browser";
 import { debounce } from "@/lib/utils/debounce";
 import { Linea } from "@/lib/shared/ordenes";
 import { aprobarLineaDirecta, rechazarLinea, fraccionarLinea, actualizarResponsable } from "@/app/actions/ordenes";
+import * as XLSX from "xlsx";
 
 const db = getBrowserClient();
 
@@ -46,6 +47,9 @@ export default function OrdenesProduccionPage() {
   const [rejectTarget, setRejectTarget] = useState<string[] | null>(null);
   const [rejectNota,   setRejectNota]   = useState("");
   const [fraccion,     setFraccion]     = useState<FraccionForm | null>(null);
+
+  const [search,       setSearch]       = useState("");
+  const [fOperador,    setFOperador]    = useState("all");
 
   // ── Carga ─────────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
@@ -142,10 +146,36 @@ export default function OrdenesProduccionPage() {
     rechazada: lineas.filter(l => l.estado === "rechazada").length,
   };
 
-  const filtradas  = filtro === "todas" ? lineas : lineas.filter(l => l.estado === filtro);
+  const q = search.toLowerCase().trim();
+  const byEstado  = filtro === "todas" ? lineas : lineas.filter(l => l.estado === filtro);
+  const byOp      = fOperador === "all" ? byEstado : byEstado.filter(l => (l.responsable || "") === fOperador);
+  const filtradas = q
+    ? byOp.filter(l =>
+        (l.codigo       || "").toLowerCase().includes(q) ||
+        (l.descripcion  || "").toLowerCase().includes(q) ||
+        (l.numero_orden || "").toLowerCase().includes(q) ||
+        (l.localizador_origen  || "").toLowerCase().includes(q) ||
+        (l.localizador_destino || "").toLowerCase().includes(q) ||
+        (l.lote || "").toLowerCase().includes(q)
+      )
+    : byOp;
+
   const pendVista  = filtradas.filter(l => l.estado === "pendiente");
   const selPend    = [...selected].filter(id => pendVista.some(l => l.id === id));
   const allSelPend = pendVista.length > 0 && pendVista.every(l => selected.has(l.id));
+
+  function exportXlsx() {
+    const rows = filtradas.map(l => ({
+      numero_orden: l.numero_orden, codigo: l.codigo, descripcion: l.descripcion,
+      lote: l.lote, origen: l.localizador_origen, destino: l.localizador_destino,
+      pallets: l.pallets, metraje: l.metraje, estado: l.estado,
+      responsable: l.responsable, created_at: l.created_at,
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Ordenes");
+    XLSX.writeFile(wb, `ordenes_${new Date().toISOString().slice(0,10)}.xlsx`);
+  }
 
   return (
     <div style={s.root} className="page-root">
@@ -175,6 +205,30 @@ export default function OrdenesProduccionPage() {
             <div style={s.statLabel}>{st.l}</div>
           </div>
         ))}
+      </div>
+
+      {/* Búsqueda y filtros */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+        <input value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Buscar código, descripción, orden, localizador, lote…"
+          style={{ flex: "1 1 280px", fontSize: 12, padding: "7px 10px", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 4, background: "#fff", color: "#1e293b", outline: "none", fontFamily: "'Courier New', monospace" }} />
+        <select value={fOperador} onChange={e => setFOperador(e.target.value)}
+          style={{ fontSize: 11, padding: "7px 10px", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 4, background: "#fff", color: "#1e293b", outline: "none", fontFamily: "'Courier New', monospace", cursor: "pointer" }}>
+          <option value="all">Todos los operadores</option>
+          <option value="">Sin asignar</option>
+          {operadores.map(op => <option key={op.id} value={op.nombre}>{op.nombre}</option>)}
+        </select>
+        {(search || fOperador !== "all") && (
+          <button onClick={() => { setSearch(""); setFOperador("all"); }}
+            style={{ fontSize: 11, padding: "7px 10px", border: "1px solid rgba(248,113,113,0.3)", borderRadius: 4, background: "transparent", color: "#f87171", cursor: "pointer", fontFamily: "'Courier New', monospace" }}>
+            ✕ Limpiar
+          </button>
+        )}
+        <button onClick={exportXlsx} disabled={!filtradas.length}
+          style={{ fontSize: 11, padding: "7px 12px", border: "1px solid rgba(22,101,52,0.4)", borderRadius: 4, background: filtradas.length ? "#f0fdf4" : "transparent", color: "#166534", cursor: filtradas.length ? "pointer" : "not-allowed", fontFamily: "'Courier New', monospace", fontWeight: 600, opacity: filtradas.length ? 1 : 0.5 }}>
+          ⬇ Exportar ({filtradas.length})
+        </button>
+        {q && <span style={{ fontSize: 11, color: "#94a3b8", fontFamily: "'Courier New', monospace" }}>{filtradas.length} resultado{filtradas.length !== 1 ? "s" : ""}</span>}
       </div>
 
       {/* Tabs */}

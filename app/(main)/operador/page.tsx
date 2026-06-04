@@ -30,13 +30,29 @@ function Timer({ startIso }: { startIso: string }) {
   );
 }
 
+const LS_KEY = "operador_nombre";
+
 export default function OperadorPage() {
-  const [lineas, setLineas] = useState<Linea[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [filtro, setFiltro] = useState<"aprobada" | "en_proceso" | "completada" | "todas">("aprobada");
-  const [saving, setSaving] = useState<string | null>(null);
-  const [flash, setFlash] = useState("");
+  const [lineas,   setLineas]   = useState<Linea[]>([]);
+  const [loading,  setLoading]  = useState(true);
+  const [filtro,   setFiltro]   = useState<"aprobada" | "en_proceso" | "completada" | "todas">("aprobada");
+  const [saving,   setSaving]   = useState<string | null>(null);
+  const [flash,    setFlash]    = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [search,   setSearch]   = useState("");
+
+  // Operadores disponibles y quién soy
+  const [operadores,    setOperadores]    = useState<{ id: string; nombre: string }[]>([]);
+  const [miNombre,      setMiNombre]      = useState<string>(() =>
+    typeof window !== "undefined" ? (localStorage.getItem(LS_KEY) ?? "") : ""
+  );
+  const [showSelector,  setShowSelector]  = useState(false);
+
+  function elegirNombre(nombre: string) {
+    setMiNombre(nombre);
+    localStorage.setItem(LS_KEY, nombre);
+    setShowSelector(false);
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,7 +67,8 @@ export default function OperadorPage() {
 
   useEffect(() => {
     load();
-    // Debounced reload — under high write load, batch rapid events into one fetch
+    db.from("usuarios_bodega").select("id,nombre").eq("activo", true).order("nombre")
+      .then(({ data }) => setOperadores((data as { id: string; nombre: string }[]) ?? []));
     const debouncedLoad = debounce(load, 800);
     const ch = db.channel("op_realtime")
       .on("postgres_changes", { event: "*", schema: "public", table: "lineas_reubicacion" }, debouncedLoad)
@@ -86,26 +103,72 @@ export default function OperadorPage() {
     showFlash(`✓ Tarea completada en ${duracion.toFixed(1)} min`);
   }
 
-  const filtradas = filtro === "todas" ? lineas : lineas.filter(l => l.estado === filtro);
+  // Filtrado: por nombre, por estado, por búsqueda
+  const porNombre  = miNombre ? lineas.filter(l => l.responsable === miNombre) : lineas;
+  const porEstado  = filtro === "todas" ? porNombre : porNombre.filter(l => l.estado === filtro);
+  const q          = search.toLowerCase().trim();
+  const filtradas  = q
+    ? porEstado.filter(l =>
+        (l.codigo              || "").toLowerCase().includes(q) ||
+        (l.descripcion         || "").toLowerCase().includes(q) ||
+        (l.localizador_origen  || "").toLowerCase().includes(q) ||
+        (l.localizador_destino || "").toLowerCase().includes(q) ||
+        (l.lote                || "").toLowerCase().includes(q)
+      )
+    : porEstado;
 
   const stats = {
-    asignadas: lineas.filter(l => l.estado === "aprobada").length,
-    enProceso: lineas.filter(l => l.estado === "en_proceso").length,
-    completadas: lineas.filter(l => l.estado === "completada").length,
-    totalViajes: lineas.filter(l => l.estado !== "completada").reduce((s, l) => s + viajesPorLinea(l.pallets || 0), 0),
+    asignadas:   porNombre.filter(l => l.estado === "aprobada").length,
+    enProceso:   porNombre.filter(l => l.estado === "en_proceso").length,
+    completadas: porNombre.filter(l => l.estado === "completada").length,
+    totalViajes: porNombre.filter(l => l.estado !== "completada").reduce((s, l) => s + viajesPorLinea(l.pallets || 0), 0),
   };
 
   return (
     <div style={s.root} className="page-root">
       {flash && <div style={s.flash}>{flash}</div>}
 
+      {/* ── SELECTOR "¿QUIÉN SOY?" ─────────────────────────────────────── */}
+      {showSelector && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+          onClick={() => setShowSelector(false)}>
+          <div style={{ background: "#f8fafc", border: "1px solid rgba(249,115,22,0.3)", borderRadius: 8, padding: "24px 28px", width: "100%", maxWidth: 360 }}
+            onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 11, letterSpacing: 3, fontWeight: 700, color: "#f97316", marginBottom: 16 }}>¿QUIÉN ERES?</div>
+            {operadores.length === 0
+              ? <p style={{ fontSize: 12, color: "#64748b" }}>No hay operadores registrados en Configuración.</p>
+              : operadores.map(op => (
+                  <button key={op.id} onClick={() => elegirNombre(op.nombre)}
+                    style={{ display: "block", width: "100%", textAlign: "left", padding: "10px 14px", marginBottom: 6, fontSize: 13, fontWeight: miNombre === op.nombre ? 700 : 500, background: miNombre === op.nombre ? "#fff7ed" : "#f1f5f9", border: `1px solid ${miNombre === op.nombre ? "rgba(249,115,22,0.4)" : "rgba(0,0,0,0.08)"}`, borderRadius: 4, cursor: "pointer", color: miNombre === op.nombre ? "#f97316" : "#1e293b", fontFamily: "'Courier New', monospace" }}>
+                    {miNombre === op.nombre ? "✓ " : ""}{op.nombre}
+                  </button>
+                ))
+            }
+            {miNombre && (
+              <button onClick={() => elegirNombre("")}
+                style={{ marginTop: 8, fontSize: 11, color: "#94a3b8", background: "transparent", border: "none", cursor: "pointer", padding: "4px 0", fontFamily: "'Courier New', monospace" }}>
+                Ver todas las tareas (sin filtrar)
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       <div style={s.pageHeader}>
-        <div style={s.badge}>OPERADOR — REUBICACION</div>
-        <h1 style={s.title}>Mis Tareas Asignadas</h1>
-        <p style={s.sub}>Solo se muestran las líneas aprobadas por el supervisor · 2 pallets por viaje</p>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <div style={s.badge}>OPERADOR — REUBICACION</div>
+            <h1 style={s.title}>{miNombre ? `Hola, ${miNombre.split(" ")[0]}` : "Mis Tareas Asignadas"}</h1>
+            <p style={s.sub}>Líneas aprobadas por el supervisor · 2 pallets por viaje</p>
+          </div>
+          <button onClick={() => setShowSelector(true)}
+            style={{ fontSize: 11, padding: "8px 14px", border: `1px solid ${miNombre ? "rgba(249,115,22,0.4)" : "rgba(0,0,0,0.15)"}`, borderRadius: 4, background: miNombre ? "#fff7ed" : "#f1f5f9", color: miNombre ? "#f97316" : "#64748b", cursor: "pointer", fontFamily: "'Courier New', monospace", fontWeight: 600, whiteSpace: "nowrap" }}>
+            👷 {miNombre || "Seleccionar operador"}
+          </button>
+        </div>
       </div>
 
-      {/* Stats */}
+      {/* Stats — calculados sobre las tareas del operador seleccionado */}
       <div style={s.statsRow} className="stats-4col">
         <div style={s.statCard}>
           <div style={{ fontSize: 26, fontWeight: 700, color: "#4ade80" }}>{stats.asignadas}</div>
@@ -123,6 +186,13 @@ export default function OperadorPage() {
           <div style={{ fontSize: 26, fontWeight: 700, color: "#fbbf24" }}>{stats.totalViajes}</div>
           <div style={s.statLabel}>VIAJES PENDIENTES</div>
         </div>
+      </div>
+
+      {/* Búsqueda */}
+      <div style={{ marginBottom: 12 }}>
+        <input value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Buscar código, descripción, localizador, lote…"
+          style={{ width: "100%", fontSize: 12, padding: "8px 12px", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 4, background: "#fff", color: "#1e293b", outline: "none", fontFamily: "'Courier New', monospace", boxSizing: "border-box" }} />
       </div>
 
       {/* Filtros */}

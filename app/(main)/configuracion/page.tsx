@@ -194,6 +194,7 @@ export default function ConfiguracionPage() {
 
       let headerIdx = -1, codIdx = -1, metIdx = -1, descIdx = -1;
       let cajasPalletIdx = -1, m2CjIdx = -1, m2PeIdx = -1, formatoIdx = -1;
+      let lineaNegocioIdx = -1;
       for (let i = 0; i < Math.min(20, rows.length); i++) {
         const row = (rows[i] as unknown[]).map(norm);
         const ci = row.findIndex(c =>
@@ -202,13 +203,19 @@ export default function ConfiguracionPage() {
         );
         if (ci < 0) continue;
         headerIdx = i; codIdx = ci;
-        descIdx        = row.findIndex((c, idx) => idx !== ci && (c.startsWith("DESC") || c === "NOMBRE" || c === "PRODUCTO"));
-        cajasPalletIdx = row.findIndex((c, idx) => idx !== ci && (c === "CAJAS POR PALET" || c === "CAJAS POR PALLET" || c.startsWith("CAJA")));
-        m2CjIdx        = row.findIndex((c, idx) => idx !== ci && (c === "M2 X CJ" || c === "M2XCJ" || c === "M2 CJ"));
-        m2PeIdx        = row.findIndex((c, idx) => idx !== ci && (c === "M2 X PE" || c === "M2XPE" || c === "M2 PE"));
-        formatoIdx     = row.findIndex((c, idx) => idx !== ci && c === "FORMATO");
-        // M2 = metraje por pallet — buscar después de excluir los demás
-        const used = new Set([ci, descIdx, cajasPalletIdx, m2CjIdx, m2PeIdx, formatoIdx].filter(x => x >= 0));
+        descIdx         = row.findIndex((c, idx) => idx !== ci && (c.startsWith("DESC") || c.includes("NOMBRE") || c === "PRODUCTO"));
+        lineaNegocioIdx = row.findIndex((c, idx) => idx !== ci && (c.includes("LINEA") || c.includes("NEGOCIO")));
+        cajasPalletIdx  = row.findIndex((c, idx) => idx !== ci && (c === "CAJAS POR PALET" || c === "CAJAS POR PALLET" || c.startsWith("CAJA")));
+        // m2 por caja: detectar antes que metIdx para que quede excluido del set
+        m2CjIdx  = row.findIndex((c, idx) => idx !== ci && (
+          c === "M2 X CJ" || c === "M2XCJ" || c === "M2 CJ" ||
+          (c.includes("METRO") && c.includes("CAJA")) ||
+          (c.includes("M2") && c.includes("CAJA"))
+        ));
+        m2PeIdx  = row.findIndex((c, idx) => idx !== ci && (c === "M2 X PE" || c === "M2XPE" || c === "M2 PE"));
+        formatoIdx = row.findIndex((c, idx) => idx !== ci && c === "FORMATO");
+        // metraje por pallet — solo si hay columna explícita (no m2/caja)
+        const used = new Set([ci, descIdx, lineaNegocioIdx, cajasPalletIdx, m2CjIdx, m2PeIdx, formatoIdx].filter(x => x >= 0));
         metIdx = row.findIndex((c, idx) => !used.has(idx) && (c === "M2" || c === "METRAJE" || c.includes("METRO") || c.includes("METRAJE")));
         break;
       }
@@ -227,13 +234,18 @@ export default function ConfiguracionPage() {
         const r   = rows[i] as unknown[];
         const cod = String(r[codIdx] || "").trim();
         if (!cod) continue;
+        const cajas = num(r, cajasPalletIdx);
+        const m2cj  = num(r, m2CjIdx);
+        const metraje = num(r, metIdx)
+          ?? (cajas != null && m2cj != null ? Math.round(cajas * m2cj * 10000) / 10000 : null);
         records.push({
           codigo:             cod.toUpperCase(),
           descripcion:        str(r, descIdx),
-          metraje_por_pallet: num(r, metIdx),
-          cajas_por_pallet:   num(r, cajasPalletIdx),
-          m2_x_caja:         num(r, m2CjIdx),
-          m2_x_pe:           num(r, m2PeIdx),
+          linea_negocio:      str(r, lineaNegocioIdx),
+          cajas_por_pallet:   cajas,
+          m2_x_caja:          m2cj,
+          m2_x_pe:            num(r, m2PeIdx),
+          metraje_por_pallet: metraje,
           formato:            str(r, formatoIdx),
         });
       }
