@@ -28,6 +28,15 @@ export interface LocationIn {
   activo?: boolean;
 }
 
+export interface LocationSuggestion {
+  localizador: string;
+  zona: string;
+  score: number;
+  reason: string;
+  capacidad_disponible: number;
+  es_consolidacion: boolean;
+}
+
 export interface AssignedLine extends StockItem {
   pallets_efectivos: number;
   subinventario_destino: string;
@@ -35,6 +44,7 @@ export interface AssignedLine extends StockItem {
   inv_pe: number;
   sin_espacio: boolean;
   is_fragment: boolean;
+  sugerencias?: LocationSuggestion[];
 }
 
 // ── Mutable location state ────────────────────────────────────────────────────
@@ -58,31 +68,131 @@ function r1FormatoOk(locFormato: string, itemFormato: string): boolean {
   return lf === itf;
 }
 
-// ── R4: score para elegir MAX ─────────────────────────────────────────────────
-// +1000 si el localizador ya tiene este lote; minimiza espacio desperdiciado
+// ── R4: score mejorado para elegir MAX ───────────────────────────────────────
+// Considera múltiples factores: consolidación de lote, eficiencia de espacio,
+// minimización de fragmentación y carga de zona
+interface ScoreResult {
+  score: number;
+  reasons: string[];
+}
+
 function scoreR4(
   loc: LocState,
   pallets: number,
   locLoteKey: string,           // `${loc.localizador}|||${codigo}|||${lote}`
   existingLots: Set<string>,
-): number {
-  const hasLote = existingLots.has(locLoteKey) ? 1000 : 0;
-  return hasLote - (loc.remaining - pallets);
+  zoneLoads: Map<string, number>, // carga actual por zona (suma de pallets asignados)
+  maxZoneCapacity: number,        // capacidad máxima de zona para balance
+): ScoreResult {
+  let score = 0;
+  const reasons: string[] = [];
+
+  // 1. Bonus consolidación: +2000 si el lote ya existe en este localizador
+  if (existingLots.has(locLoteKey)) {
+    score += 2000;
+    reasons.push("Consolidación de lote");
+  }
+
+  // 2. Bonus eficiencia de espacio: minimizar desperdicio (espacio restante después de asignar)
+  const wasteAfter = Math.max(0, loc.remaining - pallets);
+  const wasteScore = 500 - wasteAfter; // Penaliza desperdicio >0
+  score += wasteScore;
+  if (wasteScore > 300) reasons.push("Uso eficiente de espacio");
+
+  // 3. Bonus de utilización: localizadores más llenos se completan primero (cohesión)
+  const utilizationRatio = (loc.originalOcupado + loc.assignedHere) / loc.capacidad;
+  const utilizationScore = Math.round(utilizationRatio * 300);
+  score += utilizationScore;
+  if (utilizationRatio > 0.7) reasons.push("Alto nivel de ocupación");
+
+  // 4. Penalidad por fragmentación: evitar dejar <20% de espacio sin usar
+  if (wasteAfter > 0 && wasteAfter < Math.max(1, loc.capacidad * 0.2)) {
+    score -= 150; // Penalizar fragmentación
+    reasons.push("Fragmentación minimizada");
+  }
+
+  // 5. Balance de zonas: evitar sobrecargar una zona
+  const zoneLoad = zoneLoads.get(loc.zona) ?? 0;
+  const zoneUtilRatio = zoneLoad / maxZoneCapacity;
+  if (zoneUtilRatio > 0.8) {
+    score -= 200; // Penalizar zonas muy cargadas
+    reasons.push("Zona con alta carga");
+  } else if (zoneUtilRatio < 0.5) {
+    score += 50; // Bonus para balancear carga
+    reasons.push("Zona con baja carga");
+  }
+
+  return { score, reasons: reasons.length > 0 ? reasons : ["Ubicación estándar"] };
 }
 
-// ── Core algorithm (4 reglas) ─────────────────────────────────────────────────
+// ── Generar sugerencias: Top 3 ubicaciones ────────────────────────────────────
+function generateSuggestions(
+  pool: Map<string, LocState>,
+  effPallets: number,
+  itemFormato: string,
+  itemCodigo: string,
+  itemLote: string,
+  existingLots: Set<string>,
+  zoneLoads: Map<string, number>,
+  maxZoneCapacity: number,
+  excludeNoSpace: boolean = false,
+): LocationSuggestion[] {
+  const candidates = [...pool.values()]
+    .filter(loc => r1FormatoOk(loc.formato, itemFormato))
+    .filter(loc => !excludeNoSpace || loc.remaining >= effPallets);
+
+  if (candidates.length === 0) return [];
+
+  // Calcular scores
+  const scored = candidates.map(loc => {
+    const lk = `${loc.localizador}|||${itemCodigo}|||${itemLote}`;
+    const { score, reasons } = scoreR4(
+      loc,
+      effPallets,
+      lk,
+      existingLots,
+      zoneLoads,
+      maxZoneCapacity
+    );
+    const isConsolidacion = existingLots.has(lk);
+    return {
+      loc,
+      score,
+      reasons,
+      isConsolidacion,
+    };
+  });
+
+  // Top 3 ordenados por score
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map(s => ({
+      localizador: s.loc.localizador,
+      zona: s.loc.zona,
+      score: s.score,
+      reason: s.reasons.join(" · "),
+      capacidad_disponible: s.loc.remaining,
+      es_consolidacion: s.isConsolidacion,
+    }));
+}
+
+// ── Core algorithm: Razonamiento Humano para Ubicación ──────────────────────
 function computePlan(
   items: StockItem[],
   locations: LocationIn[],
-  existingLots: Set<string>,     // `${localizador}|||${codigo}|||${lote}`
+  existingLots: Set<string>,
 ): AssignedLine[] {
 
   // Pool: R3 — solo localizadores activos con espacio
   const pool = new Map<string, LocState>();
+  const zoneToLocations = new Map<string, LocState[]>();
+  let maxZoneCapacity = 0;
+
   for (const loc of locations) {
-    if (loc.activo === false) continue;           // R3
+    if (loc.activo === false) continue;
     if ((loc.disponible ?? 0) <= 0) continue;
-    pool.set(loc.localizador, {
+    const locState: LocState = {
       zona:            loc.zona,
       localizador:     loc.localizador,
       formato:         (loc.formato ?? "").toUpperCase().trim(),
@@ -90,127 +200,252 @@ function computePlan(
       originalOcupado: loc.ocupado ?? 0,
       remaining:       loc.disponible,
       assignedHere:    0,
-    });
+    };
+    pool.set(loc.localizador, locState);
+    
+    if (!zoneToLocations.has(loc.zona)) {
+      zoneToLocations.set(loc.zona, []);
+    }
+    zoneToLocations.get(loc.zona)!.push(locState);
+    maxZoneCapacity = Math.max(maxZoneCapacity, loc.capacidad);
   }
 
-  // Agrupar ítems por código+lote para priorizar los más grandes
-  interface LotGroup { codigo: string; lote: string; formato: string; totalPallets: number; items: StockItem[]; }
-  const lotMap = new Map<string, LotGroup>();
+  // ── Agrupación inteligente: Código → Lotes → Items ───────────────────────
+  interface CodeGroup {
+    codigo: string;
+    descripcion: string;
+    formato: string;
+    lotes: Map<string, {
+      lote: string;
+      totalPallets: number;
+      items: StockItem[];
+    }>;
+    totalPalletsCode: number;
+  }
+
+  const codeMap = new Map<string, CodeGroup>();
   for (const item of items) {
-    const key = `${item.codigo}|||${item.lote}`;
-    if (!lotMap.has(key)) {
-      lotMap.set(key, {
-        codigo:       item.codigo,
-        lote:         item.lote,
-        formato:      (item.formato ?? "").toUpperCase().trim(),
-        totalPallets: 0,
-        items:        [],
+    if (!codeMap.has(item.codigo)) {
+      codeMap.set(item.codigo, {
+        codigo: item.codigo,
+        descripcion: item.descripcion,
+        formato: (item.formato ?? "").toUpperCase().trim(),
+        lotes: new Map(),
+        totalPalletsCode: 0,
       });
     }
-    const g = lotMap.get(key)!;
-    g.items.push(item);
-    g.totalPallets += item.pallets + (item.cajas > 0 ? 1 : 0);
+
+    const codeGroup = codeMap.get(item.codigo)!;
+    const effPallets = item.pallets + (item.cajas > 0 ? 1 : 0);
+    codeGroup.totalPalletsCode += effPallets;
+
+    if (!codeGroup.lotes.has(item.lote)) {
+      codeGroup.lotes.set(item.lote, {
+        lote: item.lote,
+        totalPallets: 0,
+        items: [],
+      });
+    }
+    const lotGroup = codeGroup.lotes.get(item.lote)!;
+    lotGroup.totalPallets += effPallets;
+    lotGroup.items.push(item);
   }
 
-  // Lotes más grandes primero
-  const lotGroups = [...lotMap.values()].sort((a, b) => b.totalPallets - a.totalPallets);
+  // ── Ordenar códigos por volumen (grandes primero) ─────────────────────────
+  const codeGroups = [...codeMap.values()]
+    .sort((a, b) => b.totalPalletsCode - a.totalPalletsCode);
 
   const result: AssignedLine[] = [];
+  const zoneLoads = new Map<string, number>();
+  const codigoLocalizadores = new Map<string, Set<string>>(); // Track códigos por localizador
 
-  for (const group of lotGroups) {
-    for (const item of group.items) {
-      const effPallets  = item.pallets + (item.cajas > 0 ? 1 : 0);
-      const itemFormato = group.formato;
+  // ── Procesamiento por código ───────────────────────────────────────────────
+  for (const codeGroup of codeGroups) {
+    const codFormat = codeGroup.formato;
 
-      if (effPallets === 0) {
-        result.push({ ...item, pallets_efectivos: 0, subinventario_destino: "", localizador_destino: "SIN PALLETS", inv_pe: 0, sin_espacio: false, is_fragment: false });
-        continue;
-      }
+    // Ordenar lotes por tamaño (más grande primero)
+    const sortedLotes = [...codeGroup.lotes.values()]
+      .sort((a, b) => b.totalPallets - a.totalPallets);
 
-      // ── Intento sin fragmentar (R1 + R2 + R4) ────────────────────────────
-      const fullFit = [...pool.values()].filter(loc =>
-        r1FormatoOk(loc.formato, itemFormato) &&   // R1
-        loc.remaining >= effPallets                  // R2: cabe entero
-      );
+    // Para cada lote de este código
+    for (const lotGroup of sortedLotes) {
+      for (const item of lotGroup.items) {
+        const effPallets = item.pallets + (item.cajas > 0 ? 1 : 0);
+        
+        if (effPallets === 0) {
+          result.push({
+            ...item,
+            pallets_efectivos: 0,
+            subinventario_destino: "",
+            localizador_destino: "SIN PALLETS",
+            inv_pe: 0,
+            sin_espacio: false,
+            is_fragment: false,
+          });
+          continue;
+        }
 
-      if (fullFit.length > 0) {
-        const best = fullFit.reduce((best, loc) => {
-          const lk = `${loc.localizador}|||${item.codigo}|||${item.lote}`;
-          const bk = `${best.localizador}|||${item.codigo}|||${item.lote}`;
-          return scoreR4(loc, effPallets, lk, existingLots) >
-                 scoreR4(best, effPallets, bk, existingLots) ? loc : best;
-        });
+        const lk = `${item.codigo}|||${item.lote}`;
 
-        best.remaining    -= effPallets;
-        best.assignedHere += effPallets;
-
-        result.push({
-          ...item,
-          pallets_efectivos:     effPallets,
-          subinventario_destino: best.zona,
-          localizador_destino:   best.localizador,
-          inv_pe:                best.originalOcupado + best.assignedHere,
-          sin_espacio:           false,
-          is_fragment:           false,
-        });
-        continue;
-      }
-
-      // ── Fragmentación: R1 + cualquier espacio disponible ─────────────────
-      let remaining = effPallets;
-      let isFirst   = true;
-
-      while (remaining > 0) {
-        const fragPool = [...pool.values()].filter(loc =>
-          r1FormatoOk(loc.formato, itemFormato) && loc.remaining > 0
+        // ── Estrategia 1: Consolidación de lote (más importante) ────────────
+        const consolidationLoc = [...pool.values()].find(loc =>
+          r1FormatoOk(loc.formato, codFormat) &&
+          loc.remaining >= effPallets &&
+          existingLots.has(`${loc.localizador}|||${lk}`)
         );
-        if (!fragPool.length) break;
 
-        const best = fragPool.reduce((best, loc) => {
-          const take   = Math.min(loc.remaining, remaining);
-          const bestTk = Math.min(best.remaining, remaining);
-          const lk  = `${loc.localizador}|||${item.codigo}|||${item.lote}`;
-          const bk  = `${best.localizador}|||${item.codigo}|||${item.lote}`;
-          return scoreR4(loc, take, lk, existingLots) >
-                 scoreR4(best, bestTk, bk, existingLots) ? loc : best;
-        });
+        if (consolidationLoc) {
+          consolidationLoc.remaining -= effPallets;
+          consolidationLoc.assignedHere += effPallets;
+          zoneLoads.set(consolidationLoc.zona, (zoneLoads.get(consolidationLoc.zona) ?? 0) + effPallets);
+          
+          if (!codigoLocalizadores.has(item.codigo)) codigoLocalizadores.set(item.codigo, new Set());
+          codigoLocalizadores.get(item.codigo)!.add(consolidationLoc.localizador);
 
-        const take     = Math.min(best.remaining, remaining);
-        best.remaining    -= take;
-        best.assignedHere += take;
+          result.push({
+            ...item,
+            pallets_efectivos: effPallets,
+            subinventario_destino: consolidationLoc.zona,
+            localizador_destino: consolidationLoc.localizador,
+            inv_pe: consolidationLoc.originalOcupado + consolidationLoc.assignedHere,
+            sin_espacio: false,
+            is_fragment: false,
+            sugerencias: generateSuggestions(pool, effPallets, codFormat, item.codigo, item.lote, existingLots, zoneLoads, maxZoneCapacity, true),
+          });
+          continue;
+        }
 
-        result.push({
-          ...item,
-          pallets:               isFirst ? item.pallets : take,
-          cajas:                 isFirst ? item.cajas : 0,
-          pallets_efectivos:     isFirst ? effPallets : take,
-          subinventario_destino: best.zona,
-          localizador_destino:   best.localizador,
-          inv_pe:                best.originalOcupado + best.assignedHere,
-          sin_espacio:           false,
-          is_fragment:           !isFirst,
-        });
+        // ── Estrategia 2: Llenar localizador del mismo código (Eficiencia) ─
+        const sameCodeLocs = [...pool.values()]
+          .filter(loc =>
+            r1FormatoOk(loc.formato, codFormat) &&
+            loc.remaining >= effPallets &&
+            codigoLocalizadores.get(item.codigo)?.has(loc.localizador)
+          )
+          .sort((a, b) => b.assignedHere - a.assignedHere); // Preferir el más lleno
 
-        isFirst   = false;
-        remaining -= take;
-      }
+        if (sameCodeLocs.length > 0) {
+          const bestLoc = sameCodeLocs[0];
+          bestLoc.remaining -= effPallets;
+          bestLoc.assignedHere += effPallets;
+          zoneLoads.set(bestLoc.zona, (zoneLoads.get(bestLoc.zona) ?? 0) + effPallets);
 
-      // Sin espacio en absoluto
-      if (remaining > 0 && isFirst) {
-        result.push({
-          ...item,
-          pallets_efectivos:     effPallets,
-          subinventario_destino: "",
-          localizador_destino:   "SIN ESPACIO",
-          inv_pe:                0,
-          sin_espacio:           true,
-          is_fragment:           false,
-        });
+          result.push({
+            ...item,
+            pallets_efectivos: effPallets,
+            subinventario_destino: bestLoc.zona,
+            localizador_destino: bestLoc.localizador,
+            inv_pe: bestLoc.originalOcupado + bestLoc.assignedHere,
+            sin_espacio: false,
+            is_fragment: false,
+            sugerencias: generateSuggestions(pool, effPallets, codFormat, item.codigo, item.lote, existingLots, zoneLoads, maxZoneCapacity, true),
+          });
+          continue;
+        }
+
+        // ── Estrategia 3: Llenar completamente un localizador disponible ────
+        const fullFitLocs = [...pool.values()]
+          .filter(loc =>
+            r1FormatoOk(loc.formato, codFormat) &&
+            loc.remaining >= effPallets &&
+            loc.assignedHere === 0 // Localizador vacío (nuevo para este código)
+          )
+          .sort((a, b) => {
+            // Preferir exacto o cercano al tamaño que necesitamos (eficiencia)
+            const wasteA = a.remaining - effPallets;
+            const wasteB = b.remaining - effPallets;
+            return Math.abs(wasteA) - Math.abs(wasteB);
+          });
+
+        if (fullFitLocs.length > 0) {
+          const bestLoc = fullFitLocs[0];
+          bestLoc.remaining -= effPallets;
+          bestLoc.assignedHere += effPallets;
+          zoneLoads.set(bestLoc.zona, (zoneLoads.get(bestLoc.zona) ?? 0) + effPallets);
+          
+          if (!codigoLocalizadores.has(item.codigo)) codigoLocalizadores.set(item.codigo, new Set());
+          codigoLocalizadores.get(item.codigo)!.add(bestLoc.localizador);
+
+          result.push({
+            ...item,
+            pallets_efectivos: effPallets,
+            subinventario_destino: bestLoc.zona,
+            localizador_destino: bestLoc.localizador,
+            inv_pe: bestLoc.originalOcupado + bestLoc.assignedHere,
+            sin_espacio: false,
+            is_fragment: false,
+            sugerencias: generateSuggestions(pool, effPallets, codFormat, item.codigo, item.lote, existingLots, zoneLoads, maxZoneCapacity, true),
+          });
+          continue;
+        }
+
+        // ── Estrategia 4: Fragmentación inteligente (último recurso) ────────
+        let remaining = effPallets;
+        let isFirst = true;
+
+        while (remaining > 0) {
+          const fragLocs = [...pool.values()]
+            .filter(loc =>
+              r1FormatoOk(loc.formato, codFormat) &&
+              loc.remaining > 0
+            )
+            .sort((a, b) => {
+              // Preferir localizadores con espacio más cercano al que necesitamos
+              const wasteA = Math.abs(a.remaining - remaining);
+              const wasteB = Math.abs(b.remaining - remaining);
+              return wasteA - wasteB;
+            });
+
+          if (!fragLocs.length) break;
+
+          const bestLoc = fragLocs[0];
+          const take = Math.min(bestLoc.remaining, remaining);
+          bestLoc.remaining -= take;
+          bestLoc.assignedHere += take;
+          zoneLoads.set(bestLoc.zona, (zoneLoads.get(bestLoc.zona) ?? 0) + take);
+          
+          if (!codigoLocalizadores.has(item.codigo)) codigoLocalizadores.set(item.codigo, new Set());
+          codigoLocalizadores.get(item.codigo)!.add(bestLoc.localizador);
+
+          result.push({
+            ...item,
+            pallets: isFirst ? item.pallets : take,
+            cajas: isFirst ? item.cajas : 0,
+            pallets_efectivos: isFirst ? effPallets : take,
+            subinventario_destino: bestLoc.zona,
+            localizador_destino: bestLoc.localizador,
+            inv_pe: bestLoc.originalOcupado + bestLoc.assignedHere,
+            sin_espacio: false,
+            is_fragment: !isFirst,
+            sugerencias: isFirst ? generateSuggestions(pool, Math.min(remaining, 5), codFormat, item.codigo, item.lote, existingLots, zoneLoads, maxZoneCapacity, false) : undefined,
+          });
+
+          isFirst = false;
+          remaining -= take;
+        }
+
+        // ── Sin espacio en absoluto ────────────────────────────────────────
+        if (remaining > 0 && isFirst) {
+          result.push({
+            ...item,
+            pallets_efectivos: effPallets,
+            subinventario_destino: "",
+            localizador_destino: "SIN ESPACIO",
+            inv_pe: 0,
+            sin_espacio: true,
+            is_fragment: false,
+          });
+        }
       }
     }
   }
 
-  result.sort((a, b) => a.row_idx - b.row_idx || (a.is_fragment ? 1 : -1));
+  // ── Ordenar resultado por índice y estado ──────────────────────────────────
+  result.sort((a, b) => {
+    if (a.row_idx !== b.row_idx) return a.row_idx - b.row_idx;
+    return (a.is_fragment ? 1 : 0) - (b.is_fragment ? 1 : 0);
+  });
+
   return result;
 }
 

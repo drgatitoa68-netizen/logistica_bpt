@@ -13,6 +13,7 @@ const NAV = [
   { href: "/ordenes-produccion",   icon: "📋", label: "ÓRDENES" },
   { href: "/operador",             icon: "👷", label: "OPERADOR" },
   { href: "/ubicacion-produccion", icon: "🗺", label: "UBICACIÓN" },
+  { href: "/reportes",             icon: "📊", label: "REPORTES" },
   { href: "/configuracion",        icon: "⚙", label: "CONFIGURACIÓN" },
 ];
 

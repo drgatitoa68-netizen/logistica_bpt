@@ -1,9 +1,9 @@
 "use client";
 
-import { useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { getBrowserClient } from "@/lib/supabase/browser";
-import type { AssignedLine } from "@/app/api/plan-ubicacion/route";
+import type { AssignedLine, LocationSuggestion } from "@/app/api/plan-ubicacion/route";
 import { crearLineas } from "@/app/actions/ordenes";
 
 const db = getBrowserClient();
@@ -32,10 +32,46 @@ export default function UbicacionProduccionPage() {
   const [flash,     setFlash]     = useState<{ msg: string; ok: boolean } | null>(null);
   const [creating,  setCreating]  = useState(false);
   const [editDest,  setEditDest]  = useState<Map<number, string>>(new Map());
+  const [showSuggestions, setShowSuggestions] = useState<number | null>(null);
+  const [showConfirmCreate, setShowConfirmCreate] = useState(false);
+  const [pendingOrders, setPendingOrders] = useState<any[]>([]);
+  const [zonas,     setZonas]     = useState<string[]>([]);
+  const [zonaSeleccionada, setZonaSeleccionada] = useState<string>("");
+  const [loadingZonas, setLoadingZonas] = useState(true);
+  const [productosAgrupados, setProductosAgrupados] = useState<Map<string, { codigo: string; lote: string; cantidad: number; pallets: number; cajas: number; items: any[] }>>(new Map());
+  const [efficiencyMetrics, setEfficiencyMetrics] = useState<{
+    espacioUtilizado: number;
+    espacioTotal: number;
+    porcentajeUso: number;
+    fragmentacionCount: number;
+    consolidacionCount: number;
+    porZona: Map<string, { usado: number; total: number; porcentaje: number }>;
+  } | null>(null);
 
   const addLog = useCallback((msg: string, cls: LogLine["cls"] = "") => {
     setLog(p => [...p, { msg, cls }]);
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, []);
+
+  // ── Cargar zonas disponibles ──────────────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data, error } = await db
+          .from("localizadores")
+          .select("zona")
+          .eq("activo", true)
+          .order("zona");
+        if (error) throw error;
+        const uniqueZonas = [...new Set((data ?? []).map((l: any) => l.zona))].sort();
+        setZonas(uniqueZonas as string[]);
+        if (uniqueZonas.length > 0) setZonaSeleccionada(uniqueZonas[0] as string);
+      } catch (e) {
+        console.error("Error cargando zonas:", e);
+      } finally {
+        setLoadingZonas(false);
+      }
+    })();
   }, []);
 
   const showFlash = (msg: string, ok = true) => {
@@ -43,14 +79,78 @@ export default function UbicacionProduccionPage() {
     setTimeout(() => setFlash(null), 4000);
   };
 
-  // ── Excel parsing ─────────────────────────────────────────────────────────
+  const applySuggestion = (rowIdx: number, suggestion: LocationSuggestion) => {
+    const map = new Map(editDest);
+    map.set(rowIdx, suggestion.localizador);
+    setEditDest(map);
+    setShowSuggestions(null);
+    showFlash(`✓ Ubicación actualizada a ${suggestion.localizador}`);
+  };
+
+  // ── Calcular métricas de eficiencia ────────────────────────────────────────
+  function calculateEfficiencyMetrics(assignedPlan: AssignedLine[], allLocations: any[]) {
+    const porZona = new Map<string, { usado: number; total: number; porcentaje: number }>();
+    
+    // Inicializar por zona
+    for (const loc of allLocations) {
+      if (!porZona.has(loc.zona)) {
+        porZona.set(loc.zona, { usado: 0, total: 0, porcentaje: 0 });
+      }
+      const zoneData = porZona.get(loc.zona)!;
+      zoneData.total += loc.capacidad;
+    }
+
+    let fragmentacionCount = 0;
+    let consolidacionCount = 0;
+    let espacioUtilizado = 0;
+
+    for (const line of assignedPlan) {
+      if (line.sin_espacio || line.localizador_destino === "SIN PALLETS") continue;
+      
+      const palletsEfec = line.pallets_efectivos || 0;
+      espacioUtilizado += palletsEfec;
+
+      if (line.is_fragment) fragmentacionCount++;
+      if (line.sugerencias?.some(s => s.es_consolidacion)) consolidacionCount++;
+
+      if (porZona.has(line.subinventario_destino)) {
+        porZona.get(line.subinventario_destino)!.usado += palletsEfec;
+      }
+    }
+
+    // Calcular porcentajes
+    let espacioTotal = 0;
+    for (const zoneData of porZona.values()) {
+      zoneData.porcentaje = zoneData.total > 0 ? Math.round((zoneData.usado / zoneData.total) * 100) : 0;
+      espacioTotal += zoneData.total;
+    }
+
+    const porcentajeUso = espacioTotal > 0 ? Math.round((espacioUtilizado / espacioTotal) * 100) : 0;
+
+    return {
+      espacioUtilizado,
+      espacioTotal,
+      porcentajeUso,
+      fragmentacionCount,
+      consolidacionCount,
+      porZona,
+    };
+  }
+
+  // ── Excel parsing y procesamiento por zona ────────────────────────────────
   async function processFile(file: File) {
+    if (!zonaSeleccionada) {
+      showFlash("⚠ Selecciona una zona primero", false);
+      return;
+    }
+
     setLoading(true);
     setProgress(0);
     setProgLabel("");
     setLog([]);
     setPlan([]);
     setStats(null);
+    setProductosAgrupados(new Map());
 
     try {
       addLog(`📖 Leyendo "${file.name}"…`);
@@ -124,22 +224,47 @@ export default function UbicacionProduccionPage() {
       addLog(`✓ ${items.length} líneas de producción leídas`);
       setProgress(25);
 
-      // Load warehouse map from Supabase
-      addLog("⟳ Cargando mapa de localizadores desde BD…");
+      // ── Agrupar por lote y código ──────────────────────────────────────────
+      const agrupado = new Map<string, { codigo: string; lote: string; cantidad: number; pallets: number; cajas: number; items: any[] }>();
+      for (const item of items) {
+        const key = `${item.codigo}|||${item.lote}`;
+        if (!agrupado.has(key)) {
+          agrupado.set(key, {
+            codigo: item.codigo,
+            lote: item.lote,
+            cantidad: 0,
+            pallets: 0,
+            cajas: 0,
+            items: [],
+          });
+        }
+        const g = agrupado.get(key)!;
+        g.cantidad += item.cantidad_fisica;
+        g.pallets += item.pallets;
+        g.cajas += item.cajas;
+        g.items.push(item);
+      }
+      setProductosAgrupados(agrupado);
+      addLog(`✓ ${agrupado.size} grupos únicos (código + lote)`, "ok");
+      setProgress(35);
+
+      // Load warehouse map from Supabase (solo de la zona seleccionada)
+      addLog(`⟳ Cargando localizadores de zona "${zonaSeleccionada}"…`);
       const { data: locs, error: locErr } = await db
         .from("localizadores")
         .select("zona,localizador,formato,capacidad,ocupado,disponible")
-        .eq("activo", true);
+        .eq("activo", true)
+        .eq("zona", zonaSeleccionada);
       if (locErr) throw new Error("BD localizadores: " + locErr.message);
-      addLog(`✓ ${(locs ?? []).length} localizadores cargados`);
-      setProgress(40);
+      addLog(`✓ ${(locs ?? []).length} localizadores en zona "${zonaSeleccionada}"`);
+      setProgress(50);
 
-      // Call planning API
-      addLog("⟳ Ejecutando algoritmo de ubicación (greedy + consolidación de lote)…");
+      // Call planning API con zona seleccionada
+      addLog("⟳ Ejecutando algoritmo de consolidación por zona…");
       const resp = await fetch("/api/plan-ubicacion", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items, locations: locs ?? [] }),
+        body: JSON.stringify({ items, locations: locs ?? [], zona: zonaSeleccionada }),
       });
       const result = await resp.json();
       if (!result.ok) throw new Error("Plan: " + result.error);
@@ -148,11 +273,16 @@ export default function UbicacionProduccionPage() {
       const s = result.stats;
       setPlan(p);
       setStats(s);
+      
+      // Calcular métricas de eficiencia
+      const metrics = calculateEfficiencyMetrics(p, locs ?? []);
+      setEfficiencyMetrics(metrics);
+      
       setProgress(100);
       setProgLabel(`✅ Plan generado: ${s.asignados} asignadas · ${s.sinEspacio} sin espacio · ${s.fragmentos} fragmentos`);
       addLog(`✅ Plan listo: ${s.asignados}/${s.total} líneas asignadas`, "ok");
       if (s.sinEspacio > 0) addLog(`⚠ ${s.sinEspacio} líneas sin espacio disponible`, "warn");
-      if (s.fragmentos > 0) addLog(`⚠ ${s.fragmentos} líneas fragmentadas (lote dividido entre 2+ localizadores)`, "warn");
+      if (s.fragmentos > 0) addLog(`⚠ ${s.fragmentos} líneas fragmentadas`, "warn");
 
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -165,28 +295,44 @@ export default function UbicacionProduccionPage() {
 
   // ── Create orders (insert into lineas_reubicacion) ────────────────────────
   async function crearOrdenes() {
-    const toCreate = plan.filter(l => !l.sin_espacio && l.localizador_destino !== "SIN PALLETS");
-    if (!toCreate.length) { showFlash("⚠ No hay líneas para crear", false); return; }
+    const toCreate = plan
+      .filter(l => !l.sin_espacio && l.localizador_destino !== "SIN PALLETS")
+      .map(l => ({
+        cod_org_inv:            l.cod_org_inv || undefined,
+        codigo:                 l.codigo || undefined,
+        descripcion:            l.descripcion,
+        subinventario_origen:   l.subinventario_origen || undefined,
+        localizador_origen:     l.localizador_origen || undefined,
+        lote:                   l.lote || undefined,
+        cantidad_fisica:        l.cantidad_fisica,
+        pallets:                l.pallets_efectivos,
+        cajas:                  l.cajas,
+        subinventario_destino:  l.subinventario_destino || undefined,
+        localizador_destino:    (editDest.get(l.row_idx) ?? l.localizador_destino) || undefined,
+        responsable:            l.responsable || undefined,
+        inv_pe:                 l.inv_pe,
+        notas:                  l.is_fragment ? "Fragmento de lote" : undefined,
+      }));
+
+    if (!toCreate.length) {
+      showFlash("⚠ No hay líneas para crear", false);
+      return;
+    }
+
+    setPendingOrders(toCreate);
+    setShowConfirmCreate(true);
+  }
+
+  async function confirmarCrearOrdenes() {
     setCreating(true);
-    const res = await crearLineas(toCreate.map(l => ({
-      cod_org_inv:            l.cod_org_inv || undefined,
-      codigo:                 l.codigo || undefined,
-      descripcion:            l.descripcion,
-      subinventario_origen:   l.subinventario_origen || undefined,
-      localizador_origen:     l.localizador_origen || undefined,
-      lote:                   l.lote || undefined,
-      cantidad_fisica:        l.cantidad_fisica,
-      pallets:                l.pallets_efectivos,
-      cajas:                  l.cajas,
-      subinventario_destino:  l.subinventario_destino || undefined,
-      localizador_destino:    (editDest.get(l.row_idx) ?? l.localizador_destino) || undefined,
-      responsable:            l.responsable || undefined,
-      inv_pe:                 l.inv_pe,
-      notas:                  l.is_fragment ? "Fragmento de lote" : undefined,
-    })));
+    setShowConfirmCreate(false);
+    const res = await crearLineas(pendingOrders);
     setCreating(false);
     if (res?.error) showFlash(`❌ Error: ${res.error}`, false);
-    else showFlash(`✓ ${toCreate.length} órdenes creadas → Órdenes de Producción`);
+    else {
+      showFlash(`✓ ${pendingOrders.length} órdenes creadas → Órdenes de Producción`);
+      setPendingOrders([]);
+    }
   }
 
   // ── Export to Excel ───────────────────────────────────────────────────────
@@ -230,6 +376,43 @@ export default function UbicacionProduccionPage() {
         <h1 style={s.title}>Ubicación de Producción</h1>
         <p style={s.sub}>Sube el Excel de PRODUCCION · El sistema calcula la ubicación óptima para cada línea</p>
       </div>
+
+      {/* Selector de Zona */}
+      {!loadingZonas && zonas.length > 0 && (
+        <div style={s.zoneSelector}>
+          <label style={{ fontSize: 11, fontWeight: 700, color: "#475569", letterSpacing: 1 }}>
+            📍 SELECCIONA UNA ZONA:
+          </label>
+          <select
+            value={zonaSeleccionada}
+            onChange={e => setZonaSeleccionada(e.target.value)}
+            disabled={loading}
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              padding: "8px 12px",
+              border: "1px solid rgba(249,115,22,0.4)",
+              borderRadius: 3,
+              background: "#ffffff",
+              color: zonaSeleccionada ? "#0f172a" : "#94a3b8",
+              cursor: loading ? "not-allowed" : "pointer",
+              fontFamily: "'Courier New', monospace",
+              minWidth: 200,
+              outline: "none",
+            }}
+          >
+            <option value="">-- Selecciona zona --</option>
+            {zonas.map(zona => (
+              <option key={zona} value={zona}>{zona}</option>
+            ))}
+          </select>
+          {zonaSeleccionada && (
+            <span style={{ fontSize: 10, color: "#4ade80", fontWeight: 700, letterSpacing: 1 }}>
+              ✓ Zona "{zonaSeleccionada}" seleccionada
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Nota operativa */}
       <div style={s.noteBox}>
@@ -293,6 +476,63 @@ export default function UbicacionProduccionPage() {
         </div>
       )}
 
+      {/* Panel de Eficiencia */}
+      {efficiencyMetrics && plan.length > 0 && (
+        <div style={{ background: "linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)", border: "1px solid rgba(96,165,250,0.2)", borderRadius: 4, padding: "14px 16px", marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#0f172a", marginBottom: 10, letterSpacing: 1 }}>
+            📊 ANÁLISIS DE EFICIENCIA
+          </div>
+          
+          {/* Main metrics */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 12 }}>
+            {/* Uso de espacio */}
+            <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 3, padding: "10px 12px" }}>
+              <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4, fontWeight: 600, letterSpacing: 1 }}>ESPACIO UTILIZADO</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#2563eb" }}>{efficiencyMetrics.porcentajeUso}%</div>
+              <div style={{ fontSize: 9, color: "#94a3b8", marginTop: 2 }}>
+                {efficiencyMetrics.espacioUtilizado}/{efficiencyMetrics.espacioTotal} plt
+              </div>
+              <div style={{ width: "100%", height: 4, background: "#e2e8f0", borderRadius: 2, marginTop: 6, overflow: "hidden" }}>
+                <div style={{ width: `${efficiencyMetrics.porcentajeUso}%`, height: "100%", background: "#2563eb", transition: "width 0.3s" }} />
+              </div>
+            </div>
+
+            {/* Fragmentación */}
+            <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 3, padding: "10px 12px" }}>
+              <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4, fontWeight: 600, letterSpacing: 1 }}>FRAGMENTACIÓN</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: efficiencyMetrics.fragmentacionCount > stats?.fragmentos! / 2 ? "#ef4444" : "#f59e0b" }}>
+                {efficiencyMetrics.fragmentacionCount}
+              </div>
+              <div style={{ fontSize: 9, color: "#94a3b8", marginTop: 2 }}>líneas fragmentadas</div>
+            </div>
+
+            {/* Consolidación */}
+            <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 3, padding: "10px 12px" }}>
+              <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4, fontWeight: 600, letterSpacing: 1 }}>CONSOLIDACIÓN</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#16a34a" }}>
+                {efficiencyMetrics.consolidacionCount}
+              </div>
+              <div style={{ fontSize: 9, color: "#94a3b8", marginTop: 2 }}>lotes consolidados</div>
+            </div>
+          </div>
+
+          {/* Por zona */}
+          {efficiencyMetrics.porZona.size > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8, paddingTop: 10, borderTop: "1px solid #e2e8f0" }}>
+              {Array.from(efficiencyMetrics.porZona.entries()).map(([zona, data]) => (
+                <div key={zona} style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 2, padding: "8px 10px" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#0f172a", marginBottom: 4 }}>Zona {zona}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: data.porcentaje > 80 ? "#ef4444" : data.porcentaje > 60 ? "#f59e0b" : "#16a34a" }}>
+                    {data.porcentaje}%
+                  </div>
+                  <div style={{ fontSize: 8, color: "#94a3b8" }}>{data.usado}/{data.total} plt</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Stats + action buttons */}
       {stats && plan.length > 0 && (
         <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" as const, alignItems: "center" }}>
@@ -320,13 +560,108 @@ export default function UbicacionProduccionPage() {
         </div>
       )}
 
+      {/* Resumen de Consolidación por Lote */}
+      {productosAgrupados.size > 0 && plan.length === 0 && (
+        <div style={{ background: "#ffffff", border: "1px solid rgba(74,222,128,0.25)", borderRadius: 3, padding: "14px", marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#0f172a", marginBottom: 10, letterSpacing: 1 }}>
+            📦 PRODUCTOS CONSOLIDADOS POR LOTE Y CÓDIGO
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))", gap: 8 }}>
+            {Array.from(productosAgrupados.values())
+              .sort((a, b) => (b.pallets + (b.cajas > 0 ? 1 : 0)) - (a.pallets + (a.cajas > 0 ? 1 : 0)))
+              .map((prod, idx) => (
+                <div key={idx} style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 2, padding: "8px 10px", fontSize: 10 }}>
+                  <div style={{ fontWeight: 700, color: "#f97316", marginBottom: 4, fontFamily: "monospace" }}>
+                    {prod.codigo}
+                  </div>
+                  <div style={{ color: "#475569", marginBottom: 3, fontSize: 9 }}>
+                    <strong>Lote:</strong> {prod.lote || "—"}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, fontSize: 9, color: "#6b7280" }}>
+                    <span>🔹 {prod.pallets} plt + {prod.cajas} cj</span>
+                    <span>📊 {prod.cantidad.toFixed(0)} unid</span>
+                  </div>
+                  <div style={{ color: "#94a3b8", fontSize: 8, marginTop: 4 }}>
+                    {prod.items.length} línea{prod.items.length !== 1 ? 's' : ''}
+                  </div>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Modal de sugerencias */}
+      {showSuggestions !== null && (
+        <div style={s.modalOverlay} onClick={() => setShowSuggestions(null)}>
+          <div
+            style={s.modalContent}
+            onClick={e => e.stopPropagation()}
+          >
+            {(() => {
+              const line = plan.find(l => l.row_idx === showSuggestions);
+              if (!line?.sugerencias) return null;
+              return (
+                <>
+                  <div style={s.modalHeader}>
+                    <h3 style={{ margin: 0, color: "#0f172a", fontSize: 13, fontWeight: 700 }}>
+                      Ubicaciones Sugeridas
+                    </h3>
+                    <button
+                      onClick={() => setShowSuggestions(null)}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        fontSize: 16,
+                        cursor: "pointer",
+                        color: "#64748b",
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div style={s.modalBody}>
+                    <div style={{ marginBottom: 8, fontSize: 10, color: "#64748b" }}>
+                      <strong>{line.codigo}</strong> · {line.descripcion} ({line.pallets_efectivos} pallets)
+                    </div>
+                    {line.sugerencias.map((sug, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          ...s.suggestionItem,
+                          borderColor: idx === 0 ? "#4ade80" : idx === 1 ? "#60a5fa" : "#fbbf24",
+                        }}
+                        onClick={() => applySuggestion(showSuggestions, sug)}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: idx === 0 ? "#4ade80" : idx === 1 ? "#60a5fa" : "#fbbf24" }}>
+                            #{idx + 1} · {sug.localizador} ({sug.zona})
+                          </span>
+                          <span style={{ fontSize: 9, color: "#94a3b8" }}>Score: {sug.score}</span>
+                        </div>
+                        <div style={{ fontSize: 9, color: "#64748b", marginBottom: 3 }}>
+                          {sug.reason}
+                        </div>
+                        <div style={{ fontSize: 8, color: "#94a3b8", display: "flex", gap: 8 }}>
+                          <span>Disponible: {sug.capacidad_disponible} pallets</span>
+                          {sug.es_consolidacion && <span style={{ color: "#fbbf24", fontWeight: 700 }}>🔗 Consolidación</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
       {/* Plan table */}
       {plan.length > 0 && (
         <div style={s.tableWrap}>
           <table style={s.table}>
             <thead>
               <tr style={s.thead}>
-                {["ORD.#", "COD.ORG", "CÓDIGO", "DESCRIPCIÓN", "SI ORIGEN", "LOC ORIGEN", "LOTE", "CAN.FÍS.", "PLT", "CAJAS", "PLT.EFEC.", "SI DESTINO", "LOC DESTINO", "RESPONSABLE", "INV-PE", "CONTEO", "EST."].map(h => (
+                {["ORD.#", "COD.ORG", "CÓDIGO", "DESCRIPCIÓN", "SI ORIGEN", "LOC ORIGEN", "LOTE", "CAN.FÍS.", "PLT", "CAJAS", "PLT.EFEC.", "SI DESTINO", "LOC DESTINO", "SUGERENCIAS", "RESPONSABLE", "INV-PE", "CONTEO", "EST."].map(h => (
                   <th key={h} style={s.th}>{h}</th>
                 ))}
               </tr>
@@ -377,6 +712,27 @@ export default function UbicacionProduccionPage() {
                         title="Editable — cambia la ubicación destino si necesitas ajustar"
                       />
                     </td>
+                    {/* Sugerencias */}
+                    <td style={s.td}>
+                      {l.sugerencias && l.sugerencias.length > 0 && (
+                        <button
+                          style={{
+                            background: "#1e40af",
+                            border: "none",
+                            color: "#60a5fa",
+                            fontSize: 9,
+                            fontWeight: 700,
+                            padding: "3px 7px",
+                            cursor: "pointer",
+                            borderRadius: 2,
+                            fontFamily: "monospace",
+                          }}
+                          onClick={() => setShowSuggestions(l.row_idx)}
+                        >
+                          {l.sugerencias.length} opciones
+                        </button>
+                      )}
+                    </td>
                     <td style={{ ...s.td, color: "#6b7280", fontSize: 11 }}>{l.responsable || "—"}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, fontWeight: 700, color: "#1e293b" }}>{l.inv_pe || "—"}</td>
                     <td style={{ ...s.td, textAlign: "right" as const, color: "#374151" }}>{l.conteo ?? "—"}</td>
@@ -399,6 +755,192 @@ export default function UbicacionProduccionPage() {
           <div style={{ fontSize: 13, color: "#64748b" }}>Sube el Excel de Producción para ver el plan de ubicación</div>
           <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 8, maxWidth: 440, textAlign: "center" as const }}>
             El algoritmo agrupa por código + lote, prioriza localizadores con formato compatible y mantiene la consistencia de zona por producto.
+          </div>
+        </div>
+      )}
+
+      {/* ── Modal de sugerencias ──────────────────────────────────────────── */}
+      {showSuggestions !== null && (() => {
+        const line = plan.find(l => l.row_idx === showSuggestions);
+        if (!line?.sugerencias?.length) return null;
+        return (
+          <div style={s.modalOverlay} onClick={() => setShowSuggestions(null)}>
+            <div style={s.modalContent} onClick={e => e.stopPropagation()}>
+
+              {/* Header */}
+              <div style={s.modalHeader}>
+                <div>
+                  <div style={{ fontSize: 9, letterSpacing: 2, color: "#f97316", marginBottom: 4 }}>SUGERENCIAS DE UBICACIÓN</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a" }}>
+                    <span style={{ fontFamily: "monospace", color: "#f97316" }}>{line.codigo || "—"}</span>
+                    {" · "}{line.descripcion.slice(0, 42)}{line.descripcion.length > 42 ? "…" : ""}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 3 }}>
+                    Lote: <strong>{line.lote || "—"}</strong> · {line.pallets_efectivos} plt efectivos · {line.pallets} plt + {line.cajas} cj
+                  </div>
+                </div>
+                <button onClick={() => setShowSuggestions(null)} style={{ background: "transparent", border: "none", fontSize: 18, color: "#94a3b8", cursor: "pointer", padding: "2px 6px", lineHeight: 1 }}>
+                  ✕
+                </button>
+              </div>
+
+              {/* Suggestion cards */}
+              <div style={s.modalBody}>
+                {line.sugerencias.map((sg, idx) => (
+                  <div key={sg.localizador} style={{
+                    ...s.suggestionItem,
+                    borderColor: sg.es_consolidacion
+                      ? "rgba(74,222,128,0.45)"
+                      : idx === 0
+                      ? "rgba(249,115,22,0.4)"
+                      : "rgba(226,232,240,0.8)",
+                    background: sg.es_consolidacion
+                      ? "#f0fdf4"
+                      : idx === 0
+                      ? "#fffaf5"
+                      : "#f8fafc",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {idx === 0 && !sg.es_consolidacion && (
+                          <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, background: "#f97316", color: "#fff", padding: "2px 6px", borderRadius: 2 }}>MEJOR</span>
+                        )}
+                        {sg.es_consolidacion && (
+                          <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, background: "#16a34a", color: "#fff", padding: "2px 6px", borderRadius: 2 }}>CONSOLIDA LOTE</span>
+                        )}
+                        <span style={{ fontSize: 15, fontWeight: 700, fontFamily: "monospace", color: "#0f172a" }}>
+                          {sg.localizador}
+                        </span>
+                        <span style={{ fontSize: 11, color: "#64748b" }}>Zona {sg.zona}</span>
+                      </div>
+                      <button
+                        onClick={() => applySuggestion(showSuggestions, sg)}
+                        style={{ background: "#16a34a", border: "none", color: "#fff", fontSize: 10, fontWeight: 700, letterSpacing: 1, padding: "6px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" }}
+                      >
+                        APLICAR →
+                      </button>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 18, flexWrap: "wrap" as const }}>
+                      <div>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: "#2563eb", lineHeight: 1 }}>{sg.capacidad_disponible}</div>
+                        <div style={{ fontSize: 10, color: "#94a3b8" }}>plt disponibles</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: "#d97706", lineHeight: 1 }}>{sg.score.toLocaleString("es")}</div>
+                        <div style={{ fontSize: 10, color: "#94a3b8" }}>score</div>
+                      </div>
+                      <div style={{ flex: 1, fontSize: 11, color: "#475569", alignSelf: "center" as const, lineHeight: 1.5 }}>
+                        {sg.reason}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Footer */}
+              <div style={{ padding: "10px 16px 14px", borderTop: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 10, color: "#94a3b8" }}>
+                  También puedes editar directamente el campo "LOC DESTINO" en la tabla
+                </span>
+                <button onClick={() => setShowSuggestions(null)}
+                  style={{ background: "transparent", border: "1px solid #e2e8f0", color: "#64748b", fontSize: 11, padding: "6px 14px", cursor: "pointer", borderRadius: 3 }}>
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Modal de confirmación pre-creación */}
+      {showConfirmCreate && pendingOrders.length > 0 && (
+        <div style={s.modalOverlay} onClick={() => setShowConfirmCreate(false)}>
+          <div
+            style={s.modalContent}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={s.modalHeader}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#0f172a", letterSpacing: 1 }}>
+                  ✓ CONFIRMAR CREACIÓN
+                </div>
+                <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>Resumen de órdenes a crear</div>
+              </div>
+              <button onClick={() => setShowConfirmCreate(false)} style={{ background: "transparent", border: "none", fontSize: 18, color: "#94a3b8", cursor: "pointer", padding: "2px 6px", lineHeight: 1 }}>
+                ✕
+              </button>
+            </div>
+
+            <div style={s.modalBody}>
+              {/* Summary stats */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 3, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4, fontWeight: 600, letterSpacing: 1 }}>ÓRDENES A CREAR</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: "#16a34a" }}>{pendingOrders.length}</div>
+                </div>
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 3, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: "#64748b", marginBottom: 4, fontWeight: 600, letterSpacing: 1 }}>PALLETS</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: "#2563eb" }}>
+                    {pendingOrders.reduce((s, o) => s + (o.pallets || 0), 0)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Detalles principales */}
+              <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 3, padding: "12px", marginBottom: 14, fontSize: 11 }}>
+                <div style={{ fontWeight: 700, color: "#0f172a", marginBottom: 8 }}>Detalles:</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  <div>
+                    <div style={{ color: "#94a3b8", fontSize: 9, marginBottom: 2 }}>CÓDIGOS ÚNICOS</div>
+                    <div style={{ fontWeight: 700 }}>{new Set(pendingOrders.map(o => o.codigo)).size}</div>
+                  </div>
+                  <div>
+                    <div style={{ color: "#94a3b8", fontSize: 9, marginBottom: 2 }}>LOTES</div>
+                    <div style={{ fontWeight: 700 }}>{new Set(pendingOrders.map(o => o.lote)).size}</div>
+                  </div>
+                  <div>
+                    <div style={{ color: "#94a3b8", fontSize: 9, marginBottom: 2 }}>TOTAL CAJAS</div>
+                    <div style={{ fontWeight: 700 }}>{pendingOrders.reduce((s, o) => s + (o.cajas || 0), 0)}</div>
+                  </div>
+                  <div>
+                    <div style={{ color: "#94a3b8", fontSize: 9, marginBottom: 2 }}>ZONA</div>
+                    <div style={{ fontWeight: 700 }}>{zonaSeleccionada || "—"}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Validaciones */}
+              <div style={{ background: "#fffaf5", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 3, padding: "10px 12px", marginBottom: 14, fontSize: 10 }}>
+                <div style={{ fontWeight: 700, color: "#92400e", marginBottom: 6 }}>⚠ Validaciones:</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={{ color: "#b45309" }}>✓ Todas las líneas tienen destino asignado</div>
+                  {efficiencyMetrics && efficiencyMetrics.porcentajeUso > 90 && (
+                    <div style={{ color: "#dc2626" }}>⚠ Alto nivel de ocupación ({efficiencyMetrics.porcentajeUso}%)</div>
+                  )}
+                  {efficiencyMetrics && efficiencyMetrics.fragmentacionCount > pendingOrders.length * 0.3 && (
+                    <div style={{ color: "#ea580c" }}>⚠ Alta fragmentación ({efficiencyMetrics.fragmentacionCount} lotes fragmentados)</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Botones */}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button
+                  onClick={() => setShowConfirmCreate(false)}
+                  style={{ background: "transparent", border: "1px solid #e2e8f0", color: "#64748b", fontSize: 10, fontWeight: 700, letterSpacing: 1, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" }}
+                >
+                  CANCELAR
+                </button>
+                <button
+                  onClick={confirmarCrearOrdenes}
+                  disabled={creating}
+                  style={{ background: "#16a34a", border: "none", color: "#fff", fontSize: 10, fontWeight: 700, letterSpacing: 1, padding: "8px 16px", cursor: creating ? "not-allowed" : "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", opacity: creating ? 0.6 : 1 }}
+                >
+                  {creating ? "CREANDO…" : "CREAR ÓRDENES →"}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -434,4 +976,11 @@ const s: { [k: string]: React.CSSProperties } = {
   destInput:    { background: "#f8fafc", border: "1px solid", borderRadius: 2, color: "#4ade80", fontSize: 11, padding: "3px 6px", fontFamily: "'Courier New', monospace", width: 120, outline: "none" },
   badge2:       { display: "inline-block", fontSize: 9, letterSpacing: 1, fontWeight: 700, padding: "2px 7px", borderRadius: 2 },
   empty:        { textAlign: "center" as const, color: "#94a3b8", padding: "60px 20px", border: "1px dashed rgba(249,115,22,0.1)", borderRadius: 4, display: "flex", flexDirection: "column" as const, alignItems: "center" },
+  modalOverlay:  { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10000 },
+  modalContent:  { background: "#ffffff", borderRadius: 4, boxShadow: "0 10px 40px rgba(0,0,0,0.2)", maxWidth: 500, width: "90%", maxHeight: "80vh", overflowY: "auto" as const },
+  modalHeader:   { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "14px 16px", borderBottom: "1px solid rgba(249,115,22,0.15)" },
+  modalBody:     { padding: "14px 16px" },
+  suggestionItem: { border: "1px solid", borderRadius: 3, padding: "10px 12px", marginBottom: 8, cursor: "pointer", transition: "all 0.2s", background: "#f8fafc" },
+  zoneSelector:  { display: "flex", alignItems: "center", gap: 12, marginBottom: 16, background: "#ffffff", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3, padding: "10px 14px" },
 };
+
