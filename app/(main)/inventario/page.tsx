@@ -7,7 +7,7 @@ import * as XLSX from "xlsx";
 const db = getBrowserClient();
 
 interface InvRow {
-  id: string; codigo: string; descripcion: string; lote: string;
+  id: string; cod_org_inv: string; codigo: string; descripcion: string; lote: string;
   localizador: string; subinventario: string; pallets: number; cajas: number;
   cantidad_fisica: number; formato: string; um: string; estado: string;
   lote_status: string; calidad: string; marca: string; updated_at: string;
@@ -20,18 +20,19 @@ type SortKey = keyof InvRow;
 const PAGE_SIZE = 100;
 
 const COLS: { key: SortKey; label: string; align?: "right" }[] = [
-  { key: "codigo",       label: "Código" },
-  { key: "descripcion",  label: "Descripción" },
-  { key: "lote",         label: "Lote" },
-  { key: "localizador",  label: "Localizador" },
-  { key: "subinventario",label: "Subinventario" },
-  { key: "pallets",      label: "Pallets",  align: "right" },
-  { key: "cajas",        label: "Cajas",    align: "right" },
-  { key: "cantidad_fisica", label: "M²",   align: "right" },
-  { key: "um",           label: "UM" },
-  { key: "formato",      label: "Formato" },
-  { key: "estado",       label: "Estado" },
-  { key: "lote_status",  label: "Lote Status" },
+  { key: "cod_org_inv",   label: "Org.Inv" },
+  { key: "codigo",        label: "Código" },
+  { key: "descripcion",   label: "Descripción" },
+  { key: "lote",          label: "Lote" },
+  { key: "localizador",   label: "Localizador" },
+  { key: "subinventario", label: "Subinventario" },
+  { key: "pallets",       label: "Pallets",  align: "right" },
+  { key: "cajas",         label: "Cajas",    align: "right" },
+  { key: "cantidad_fisica", label: "M²",     align: "right" },
+  { key: "um",            label: "UM" },
+  { key: "formato",       label: "Formato" },
+  { key: "estado",        label: "Estado" },
+  { key: "lote_status",   label: "Lote Status" },
 ];
 
 export default function InventarioPage() {
@@ -57,16 +58,24 @@ export default function InventarioPage() {
   const load = useCallback(async () => {
     setLoading(true);
     let q = db.from("inventario").select(
-      "id,codigo,descripcion,lote,localizador,subinventario,pallets,cajas,cantidad_fisica,formato,um,estado,lote_status,calidad,marca,updated_at",
+      "id,cod_org_inv,codigo,descripcion,lote,localizador,subinventario,pallets,cajas,cantidad_fisica,formato,um,estado,lote_status,calidad,marca,updated_at",
       { count: "exact" }
     );
     if (fSubinv !== "all") q = q.eq("subinventario", fSubinv);
     if (fUm     !== "all") q = q.eq("um", fUm);
     if (fEstado !== "all") q = q.eq("estado", fEstado);
     if (fSearch) q = q.or(`codigo.ilike.%${fSearch}%,descripcion.ilike.%${fSearch}%,lote.ilike.%${fSearch}%,localizador.ilike.%${fSearch}%`);
-    const { data, count } = await q
+    const { data, count, error } = await q
       .order(sortKey, { ascending: sortAsc })
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+    
+    if (error) {
+      console.error("❌ Error al cargar inventario:", error);
+      console.warn("📋 Verifica que los campos existan: id, codigo, descripcion, lote, localizador, subinventario, pallets, cajas, cantidad_fisica, formato, um, estado, lote_status, calidad, marca, updated_at");
+    } else {
+      console.log(`✅ Datos cargados: ${count} total, ${(data || []).length} en esta página`);
+    }
+    
     setRows((data as InvRow[]) || []);
     setTotal(count ?? 0);
     setLoading(false);
@@ -79,8 +88,14 @@ export default function InventarioPage() {
     if (fUm     !== "all") q = q.eq("um", fUm);
     if (fEstado !== "all") q = q.eq("estado", fEstado);
     if (fSearch) q = q.or(`codigo.ilike.%${fSearch}%,descripcion.ilike.%${fSearch}%,lote.ilike.%${fSearch}%,localizador.ilike.%${fSearch}%`);
-    const { data } = await q;
+    const { data, error } = await q;
+    
+    if (error) {
+      console.error("❌ Error al cargar KPIs:", error);
+    }
+    
     const agg = (data as { pallets: number; cajas: number; cantidad_fisica: number }[]) || [];
+    console.log(`📊 KPIs calculados: ${agg.length} registros`, { pallets: agg.reduce((s, r) => s + (r.pallets || 0), 0), cajas: agg.reduce((s, r) => s + (r.cajas || 0), 0) });
     setKpis({
       registros: agg.length,
       pallets: agg.reduce((s, r) => s + (r.pallets || 0), 0),
@@ -91,19 +106,29 @@ export default function InventarioPage() {
 
   // Load filter options once
   useEffect(() => {
-    db.from("inventario").select("subinventario").then(({ data }) => {
+    db.from("inventario").select("subinventario").then(({ data, error }) => {
+      if (error) console.error("❌ Error cargando subinventarios:", error);
       const s = [...new Set((data || []).map((r: { subinventario: string }) => r.subinventario).filter(Boolean))].sort();
+      console.log(`✅ Subinventarios encontrados: ${s.join(", ")}`);
       setSubinvs(s);
     });
-    db.from("inventario").select("um").then(({ data }) => {
+    db.from("inventario").select("um").then(({ data, error }) => {
+      if (error) console.error("❌ Error cargando UMs:", error);
       const s = [...new Set((data || []).map((r: { um: string }) => r.um).filter(Boolean))].sort();
+      console.log(`✅ UMs encontradas: ${s.join(", ")}`);
       setUms(s);
     });
-    db.from("inventario").select("estado").then(({ data }) => {
+    db.from("inventario").select("estado").then(({ data, error }) => {
+      if (error) console.error("❌ Error cargando estados:", error);
       const s = [...new Set((data || []).map((r: { estado: string }) => r.estado).filter(Boolean))].sort();
+      console.log(`✅ Estados encontrados: ${s.join(", ")}`);
       setEstados(s);
     });
-  }, []);
+    
+    // Initial load
+    load();
+    loadKpis();
+  }, [load, loadKpis]);
 
   useEffect(() => { setPage(0); }, [fSubinv, fUm, fEstado, fSearch]);
   useEffect(() => { load(); loadKpis(); }, [load, loadKpis]);
@@ -116,13 +141,30 @@ export default function InventarioPage() {
 
   async function exportAll() {
     setExporting(true);
-    let q = db.from("inventario").select("codigo,descripcion,lote,localizador,subinventario,pallets,cajas,cantidad_fisica,formato,um,estado,lote_status,calidad,marca,updated_at");
+    let q = db.from("inventario").select("cod_org_inv,codigo,descripcion,lote,localizador,subinventario,pallets,cajas,cantidad_fisica,formato,um,estado,lote_status,calidad,marca,updated_at");
     if (fSubinv !== "all") q = q.eq("subinventario", fSubinv);
     if (fUm     !== "all") q = q.eq("um", fUm);
     if (fEstado !== "all") q = q.eq("estado", fEstado);
     if (fSearch) q = q.or(`codigo.ilike.%${fSearch}%,descripcion.ilike.%${fSearch}%,lote.ilike.%${fSearch}%,localizador.ilike.%${fSearch}%`);
     const { data } = await q.order(sortKey, { ascending: sortAsc });
-    const ws = XLSX.utils.json_to_sheet((data || []) as object[]);
+    const ws = XLSX.utils.json_to_sheet(((data || []) as InvRow[]).map((r: InvRow) => ({
+      "Org.Inv":       r.cod_org_inv  || "",
+      "Código":        r.codigo       || "",
+      "Descripción":   r.descripcion  || "",
+      "Lote":          r.lote         || "",
+      "Localizador":   r.localizador  || "",
+      "Subinventario": r.subinventario || "",
+      "Pallets":       r.pallets,
+      "Cajas":         r.cajas,
+      "M²":            r.cantidad_fisica,
+      "UM":            r.um           || "",
+      "Formato":       r.formato      || "",
+      "Estado":        r.estado       || "",
+      "Lote Status":   r.lote_status  || "",
+      "Calidad":       r.calidad      || "",
+      "Marca":         r.marca        || "",
+      "Actualizado":   r.updated_at ? new Date(r.updated_at).toLocaleString("es-EC") : "",
+    })));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Inventario");
     XLSX.writeFile(wb, `inventario_${new Date().toISOString().slice(0, 10)}.xlsx`);
@@ -156,6 +198,25 @@ export default function InventarioPage() {
           {exporting ? "⏳ Exportando…" : "⬇ Exportar todo"}
         </button>
       </div>
+
+      {/* Alerta: Sin datos */}
+      {!loading && total === 0 && (
+        <div style={{ margin: "12px 20px", padding: "12px 16px", background: "#1e2a3f", border: "1px solid #3b5a8f", borderRadius: 8, color: "#90caf9" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>⚠️ No hay datos de inventario</div>
+          <div style={{ fontSize: 11, color: "#a8c5dd", marginBottom: 8 }}>
+            Necesitas cargar los datos en Supabase para ver el inventario. Sigue estos pasos:
+          </div>
+          <ol style={{ fontSize: 11, marginLeft: 20, color: "#90caf9", lineHeight: 1.6 }}>
+            <li style={{ marginBottom: 6 }}>Ve a <strong>Supabase Dashboard → SQL Editor → New Query</strong></li>
+            <li style={{ marginBottom: 6 }}>Copia el contenido de: <code style={{ background: "#0f1117", padding: "2px 6px", borderRadius: 2, fontFamily: "monospace" }}>sql/load_inventory_data.sql</code></li>
+            <li style={{ marginBottom: 6 }}>Pega en Supabase y ejecuta (▶ button)</li>
+            <li>Recarga esta página (F5)</li>
+          </ol>
+          <div style={{ marginTop: 10, fontSize: 10, color: "#64b5f6", fontFamily: "monospace", background: "#0f1117", padding: "8px", borderRadius: 4, maxHeight: 100, overflowY: "auto" }}>
+            📄 Archivo: <code>/workspaces/logistica_bpt/sql/load_inventory_data.sql</code>
+          </div>
+        </div>
+      )}
 
       {/* KPI cards */}
       <div style={{ padding: "12px 20px", display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -218,9 +279,10 @@ export default function InventarioPage() {
                   ))
                 : rows.map((r, i) => (
                     <tr key={r.id} style={{ borderBottom: "1px solid #1e2235", background: i % 2 === 0 ? "transparent" : "#1c1f2d" }}>
-                      <td style={{ padding: "6px 10px", fontWeight: 600, color: "#93c5fd", fontFamily: "monospace", whiteSpace: "nowrap" }}>{r.codigo}</td>
-                      <td style={{ padding: "6px 10px", color: "#c8cad8", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.descripcion}>{r.descripcion || "—"}</td>
-                      <td style={{ padding: "6px 10px", color: "#8b8fa8", whiteSpace: "nowrap" }}>{r.lote || "—"}</td>
+                      <td style={{ padding: "6px 10px", color: "#6b7280", fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>{r.cod_org_inv || "—"}</td>
+                      <td style={{ padding: "6px 10px", fontWeight: 600, color: "#93c5fd", fontFamily: "monospace", whiteSpace: "nowrap" }}>{r.codigo || "—"}</td>
+                      <td style={{ padding: "6px 10px", color: "#c8cad8", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.descripcion}>{r.descripcion || "—"}</td>
+                      <td style={{ padding: "6px 10px", color: "#8b8fa8", whiteSpace: "nowrap", fontFamily: "monospace", fontSize: 10 }}>{r.lote || "—"}</td>
                       <td style={{ padding: "6px 10px", fontFamily: "monospace", whiteSpace: "nowrap" }}>{r.localizador}</td>
                       <td style={{ padding: "6px 10px", color: "#8b8fa8" }}>{r.subinventario}</td>
                       <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700, color: r.pallets > 0 ? "#4ade80" : "#5a5e75" }}>{r.pallets}</td>
@@ -229,13 +291,27 @@ export default function InventarioPage() {
                       <td style={{ padding: "6px 10px", color: "#8b8fa8" }}>{r.um || "—"}</td>
                       <td style={{ padding: "6px 10px", color: "#8b8fa8" }}>{r.formato && r.formato !== "-" ? r.formato : "—"}</td>
                       <td style={{ padding: "6px 10px" }}>
-                        <span style={{
-                          fontSize: 10, padding: "2px 7px", borderRadius: 4, fontWeight: 600,
-                          background: r.estado === "Active" ? "#14532d" : r.estado?.startsWith("Riesgo") ? "#7c2d12" : "#1e2235",
-                          color:      r.estado === "Active" ? "#4ade80" : r.estado?.startsWith("Riesgo") ? "#f97316" : "#8b8fa8",
-                        }}>{r.estado || "—"}</span>
+                        {r.estado ? (
+                          <span style={{
+                            fontSize: 10, padding: "2px 7px", borderRadius: 4, fontWeight: 600,
+                            background: /activ/i.test(r.estado)  ? "#14532d"
+                                      : /bloq|obs|def/i.test(r.estado) ? "#7c2d12"
+                                      : /riesg/i.test(r.estado)  ? "#7c2d12"
+                                      : "#1e2235",
+                            color:      /activ/i.test(r.estado)  ? "#4ade80"
+                                      : /bloq|obs|def/i.test(r.estado) ? "#f97316"
+                                      : /riesg/i.test(r.estado)  ? "#f97316"
+                                      : "#8b8fa8",
+                          }}>{r.estado}</span>
+                        ) : <span style={{ color: "#5a5e75" }}>—</span>}
                       </td>
-                      <td style={{ padding: "6px 10px", color: "#5a5e75", fontSize: 10 }}>{r.lote_status || "—"}</td>
+                      <td style={{ padding: "6px 10px", fontSize: 10 }}>
+                        {r.lote_status ? (
+                          <span style={{
+                            color: /reten|cuaren|insp/i.test(r.lote_status) ? "#fbbf24" : "#5a5e75"
+                          }}>{r.lote_status}</span>
+                        ) : <span style={{ color: "#5a5e75" }}>—</span>}
+                      </td>
                     </tr>
                   ))
               }
