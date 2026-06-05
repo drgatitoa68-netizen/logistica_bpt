@@ -38,7 +38,9 @@ export default function UbicacionProduccionPage() {
   const [zonas,     setZonas]     = useState<string[]>([]);
   const [zonaSeleccionada, setZonaSeleccionada] = useState<string>("");
   const [loadingZonas, setLoadingZonas] = useState(true);
+  const [zonaStats, setZonaStats] = useState<Map<string, { disponible: number; capacidad: number }>>(new Map());
   const [productosAgrupados, setProductosAgrupados] = useState<Map<string, { codigo: string; lote: string; cantidad: number; pallets: number; cajas: number; items: any[] }>>(new Map());
+  const [tableFiltro, setTablFiltro] = useState<"todas" | "problemas" | "sin_espacio" | "fragmentadas">("todas");
   const [efficiencyMetrics, setEfficiencyMetrics] = useState<{
     espacioUtilizado: number;
     espacioTotal: number;
@@ -53,19 +55,30 @@ export default function UbicacionProduccionPage() {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, []);
 
-  // ── Cargar zonas disponibles ──────────────────────────────────────────────
+  // ── Cargar zonas disponibles con estadísticas ────────────────────────────
   useEffect(() => {
     (async () => {
       try {
         const { data, error } = await db
           .from("localizadores")
-          .select("zona")
+          .select("zona,disponible,capacidad")
           .eq("activo", true)
           .order("zona");
         if (error) throw error;
-        const uniqueZonas = [...new Set((data ?? []).map((l: any) => l.zona))].sort();
-        setZonas(uniqueZonas as string[]);
-        if (uniqueZonas.length > 0) setZonaSeleccionada(uniqueZonas[0] as string);
+        const rows = (data ?? []) as { zona: string; disponible: number; capacidad: number }[];
+        const uniqueZonas = [...new Set(rows.map(l => l.zona))].sort();
+        setZonas(uniqueZonas);
+        if (uniqueZonas.length > 0) setZonaSeleccionada(uniqueZonas[0]);
+
+        const stats = new Map<string, { disponible: number; capacidad: number }>();
+        for (const row of rows) {
+          const cur = stats.get(row.zona) ?? { disponible: 0, capacidad: 0 };
+          stats.set(row.zona, {
+            disponible: cur.disponible + Math.max(0, row.disponible ?? 0),
+            capacidad:  cur.capacidad  + (row.capacidad ?? 0),
+          });
+        }
+        setZonaStats(stats);
       } catch (e) {
         console.error("Error cargando zonas:", e);
       } finally {
@@ -190,6 +203,7 @@ export default function UbicacionProduccionPage() {
           else if (c === "CAJAS")                                                                    col.cajas = col.cajas ?? idx;
           else if (c.includes("RESPON"))                                                             col.responsable = col.responsable ?? idx;
           else if (c === "CONTEO" || c.startsWith("CONTEO"))                                        col.conteo = col.conteo ?? idx;
+          else if (c === "FORMATO" || c.includes("FORMAT"))                                         col.formato = col.formato ?? idx;
         });
         break;
       }
@@ -217,11 +231,21 @@ export default function UbicacionProduccionPage() {
           cajas:                parseInt(String(get(r, "cajas"))) || 0,
           responsable:          String(get(r, "responsable")).trim(),
           conteo:               col.conteo !== undefined ? (parseInt(String(get(r, "conteo"))) || null) : null,
+          formato:              col.formato !== undefined ? String(get(r, "formato")).trim() : "",
         });
       }
 
       if (!items.length) throw new Error("No se encontraron filas con datos");
       addLog(`✓ ${items.length} líneas de producción leídas`);
+      
+      // Detectar si hay formatos en los datos
+      const conFormato = items.filter(it => it.formato && it.formato.length > 0).length;
+      if (conFormato > 0) {
+        const formatosUnicos = new Set(items.filter(it => it.formato).map(it => it.formato));
+        addLog(`✓ Detectado: ${conFormato}/${items.length} productos con FORMATO · Formatos: ${[...formatosUnicos].join(", ")}`, "ok");
+      } else {
+        addLog(`⚠ No se detectó columna FORMATO en el Excel · Se asignarán sin validar formato`, "warn");
+      }
       setProgress(25);
 
       // ── Agrupar por lote y código ──────────────────────────────────────────
@@ -256,6 +280,12 @@ export default function UbicacionProduccionPage() {
         .eq("activo", true)
         .eq("zona", zonaSeleccionada);
       if (locErr) throw new Error("BD localizadores: " + locErr.message);
+      
+      // Log de formatos disponibles en la zona
+      const formatosZona = new Set((locs ?? []).filter(l => l.formato).map(l => l.formato));
+      if (formatosZona.size > 0) {
+        addLog(`✓ Formatos disponibles en zona "${zonaSeleccionada}": ${[...formatosZona].join(", ")}`);
+      }
       addLog(`✓ ${(locs ?? []).length} localizadores en zona "${zonaSeleccionada}"`);
       setProgress(50);
 
@@ -402,15 +432,29 @@ export default function UbicacionProduccionPage() {
             }}
           >
             <option value="">-- Selecciona zona --</option>
-            {zonas.map(zona => (
-              <option key={zona} value={zona}>{zona}</option>
-            ))}
+            {zonas.map(zona => {
+              const zs = zonaStats.get(zona);
+              const label = zs
+                ? `${zona}  ·  ${zs.disponible} plt libres / ${zs.capacidad} total`
+                : zona;
+              return <option key={zona} value={zona}>{label}</option>;
+            })}
           </select>
-          {zonaSeleccionada && (
-            <span style={{ fontSize: 10, color: "#4ade80", fontWeight: 700, letterSpacing: 1 }}>
-              ✓ Zona "{zonaSeleccionada}" seleccionada
-            </span>
-          )}
+          {zonaSeleccionada && (() => {
+            const zs = zonaStats.get(zonaSeleccionada);
+            return (
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <span style={{ fontSize: 10, color: "#4ade80", fontWeight: 700, letterSpacing: 1 }}>
+                  ✓ Zona "{zonaSeleccionada}" seleccionada
+                </span>
+                {zs && (
+                  <span style={{ fontSize: 10, color: "#64748b" }}>
+                    {zs.disponible} pallets libres · {zs.capacidad > 0 ? Math.round(((zs.capacidad - zs.disponible) / zs.capacidad) * 100) : 0}% ocupado
+                  </span>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -590,74 +634,51 @@ export default function UbicacionProduccionPage() {
         </div>
       )}
 
-      {/* Modal de sugerencias */}
-      {showSuggestions !== null && (
-        <div style={s.modalOverlay} onClick={() => setShowSuggestions(null)}>
-          <div
-            style={s.modalContent}
-            onClick={e => e.stopPropagation()}
-          >
-            {(() => {
-              const line = plan.find(l => l.row_idx === showSuggestions);
-              if (!line?.sugerencias) return null;
-              return (
-                <>
-                  <div style={s.modalHeader}>
-                    <h3 style={{ margin: 0, color: "#0f172a", fontSize: 13, fontWeight: 700 }}>
-                      Ubicaciones Sugeridas
-                    </h3>
-                    <button
-                      onClick={() => setShowSuggestions(null)}
-                      style={{
-                        background: "none",
-                        border: "none",
-                        fontSize: 16,
-                        cursor: "pointer",
-                        color: "#64748b",
-                      }}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  <div style={s.modalBody}>
-                    <div style={{ marginBottom: 8, fontSize: 10, color: "#64748b" }}>
-                      <strong>{line.codigo}</strong> · {line.descripcion} ({line.pallets_efectivos} pallets)
-                    </div>
-                    {line.sugerencias.map((sug, idx) => (
-                      <div
-                        key={idx}
-                        style={{
-                          ...s.suggestionItem,
-                          borderColor: idx === 0 ? "#4ade80" : idx === 1 ? "#60a5fa" : "#fbbf24",
-                        }}
-                        onClick={() => applySuggestion(showSuggestions, sug)}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                          <span style={{ fontSize: 11, fontWeight: 700, color: idx === 0 ? "#4ade80" : idx === 1 ? "#60a5fa" : "#fbbf24" }}>
-                            #{idx + 1} · {sug.localizador} ({sug.zona})
-                          </span>
-                          <span style={{ fontSize: 9, color: "#94a3b8" }}>Score: {sug.score}</span>
-                        </div>
-                        <div style={{ fontSize: 9, color: "#64748b", marginBottom: 3 }}>
-                          {sug.reason}
-                        </div>
-                        <div style={{ fontSize: 8, color: "#94a3b8", display: "flex", gap: 8 }}>
-                          <span>Disponible: {sug.capacidad_disponible} pallets</span>
-                          {sug.es_consolidacion && <span style={{ color: "#fbbf24", fontWeight: 700 }}>🔗 Consolidación</span>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-
       {/* Plan table */}
-      {plan.length > 0 && (
-        <div style={s.tableWrap}>
+      {plan.length > 0 && (() => {
+        const planFiltrado = plan.filter(l => {
+          if (tableFiltro === "sin_espacio")  return l.sin_espacio;
+          if (tableFiltro === "fragmentadas") return l.is_fragment;
+          if (tableFiltro === "problemas")    return l.sin_espacio || l.is_fragment;
+          return true;
+        });
+        const cntSinEsp = plan.filter(l => l.sin_espacio).length;
+        const cntFrag   = plan.filter(l => l.is_fragment).length;
+        return (
+        <>
+          {/* Filtros de tabla */}
+          <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" as const, alignItems: "center" }}>
+            {([
+              { k: "todas",       l: `Todas (${plan.length})`,            c: "#94a3b8" },
+              { k: "problemas",   l: `Problemas (${cntSinEsp + cntFrag})`, c: "#fbbf24" },
+              { k: "sin_espacio", l: `Sin espacio (${cntSinEsp})`,          c: "#f87171" },
+              { k: "fragmentadas",l: `Fragmentadas (${cntFrag})`,           c: "#f97316" },
+            ] as const).map(f => (
+              <button
+                key={f.k}
+                onClick={() => setTablFiltro(f.k)}
+                style={{
+                  background: tableFiltro === f.k ? `${f.c}18` : "transparent",
+                  border: `1px solid ${tableFiltro === f.k ? f.c : "rgba(249,115,22,0.2)"}`,
+                  color: tableFiltro === f.k ? f.c : "#64748b",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  letterSpacing: 1,
+                  padding: "5px 10px",
+                  cursor: "pointer",
+                  borderRadius: 2,
+                  fontFamily: "'Courier New', monospace",
+                }}
+              >
+                {f.l}
+              </button>
+            ))}
+            <span style={{ marginLeft: "auto", fontSize: 10, color: "#94a3b8" }}>
+              {planFiltrado.length} fila{planFiltrado.length !== 1 ? "s" : ""} mostrada{planFiltrado.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+
+          <div style={s.tableWrap}>
           <table style={s.table}>
             <thead>
               <tr style={s.thead}>
@@ -667,7 +688,7 @@ export default function UbicacionProduccionPage() {
               </tr>
             </thead>
             <tbody>
-              {plan.map((l, i) => {
+              {planFiltrado.map((l, i) => {
                 const destOverride = editDest.get(l.row_idx);
                 const destVal = destOverride ?? l.localizador_destino;
                 const rowBg = l.sin_espacio
@@ -747,7 +768,9 @@ export default function UbicacionProduccionPage() {
             </tbody>
           </table>
         </div>
-      )}
+        </>
+        );
+      })()}
 
       {!plan.length && !loading && !progLabel && (
         <div style={s.empty}>

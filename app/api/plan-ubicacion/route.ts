@@ -424,16 +424,18 @@ function computePlan(
           remaining -= take;
         }
 
-        // ── Sin espacio en absoluto ────────────────────────────────────────
-        if (remaining > 0 && isFirst) {
+        // ── Sin espacio (total o parcial) ─────────────────────────────────
+        if (remaining > 0) {
           result.push({
             ...item,
-            pallets_efectivos: effPallets,
+            pallets: remaining,
+            cajas: isFirst ? item.cajas : 0,
+            pallets_efectivos: isFirst ? effPallets : remaining,
             subinventario_destino: "",
             localizador_destino: "SIN ESPACIO",
             inv_pe: 0,
             sin_espacio: true,
-            is_fragment: false,
+            is_fragment: !isFirst,
           });
         }
       }
