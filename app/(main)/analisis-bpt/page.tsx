@@ -13,6 +13,10 @@ interface AlertaBodega { nivel: string; mensaje: string; detalle?: string; }
 interface ResumenFormato { formato: string; total_pallets: number; m2_estimado?: number; locs_propios: number; locs_ocupados: number; cobertura_pct: number; }
 interface AnalisisData { fragmentacion: FragmentacionItem[]; consolidaciones: Consolidacion[]; alertas: AlertaBodega[]; resumen_formatos: ResumenFormato[]; metricas: Record<string, unknown>; }
 interface TooltipData { d: Localizador; zona: string; x: number; y: number; } interface SelectedLoc { d: Localizador; zona: string; }
+type UploadPhase = "idle" | "zoneSelect" | "formatCheck";
+interface FileLocData { loc: string; zona: string; formato: string; pallets: number; }
+interface FormatRow { _id: number; loc: string; zona: string; formato: string; pallets: number; locDest: string; }
+interface StockUpdate { zona: string; localizador: string; ocupado: number; disponible: number; pct_ocupacion: number; }
 // ── Colores ocupación ──────────────────────────────────────────────────────
 const C = { empty: "#1e293b", low: "#639922", mid: "#1D9E75", high: "#BA7517", full: "#E24B4A", over: "#7A1F1F", };
 function getColor(p: number) { if (p <= 0) return C.empty; if (p < 0.5) return C.low; if (p < 0.8) return C.mid; if (p < 1.0) return C.high; if (p < 1.1) return C.full; return C.over; }
@@ -36,6 +40,13 @@ const [planFilter, setPlanFilter] = useState("");
 const [tooltip, setTooltip] = useState<TooltipData | null>(null); const [selectedLoc, setSelectedLoc] = useState<SelectedLoc | null>(null); const [viewMode, setViewMode] = useState<"map" | "table">("map");
 const [importLog, setImportLog] = useState<{ msg: string; cls: string }[]>([]); const [progress, setProgress] = useState(0); const [progressLabel, setProgressLabel] = useState(""); const [importing, setImporting] = useState(false); const [dragging, setDragging] = useState(false);
 const fileRef = useRef<HTMLInputElement>(null); const logRef = useRef<HTMLDivElement>(null);
+// ── Upload flow state ────────────────────────────────────────────────────
+const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
+const [fileZones, setFileZones] = useState<string[]>([]);
+const [fileByZone, setFileByZone] = useState<Record<string, FileLocData[]>>({});
+const [fileSubInvItems, setFileSubInvItems] = useState<SubInvItem[]>([]);
+const [selZone, setSelZone] = useState("all");
+const [formatRows, setFormatRows] = useState<FormatRow[]>([]);
 // ── Cargar mapa desde BD ────────────────────────────────────────────────
 const loadMap = useCallback(async () => { try { const { data, error } = await db .from("localizadores") .select("zona,localizador,formato,pct_ocupacion,capacidad,ocupado,disponible") .eq("activo", true) .order("zona").order("localizador"); if (error) throw error; const grouped: Record<string, Localizador[]> = {}; (data || []).forEach((r: Localizador) => { if (!grouped[r.zona]) grouped[r.zona] = []; grouped[r.zona].push(r); }); setAllData(grouped); setConnOk(true); setLastUpdate(new Date().toLocaleTimeString("es-EC")); } catch { setConnOk(false); } finally { setLoading(false); } }, []);
 useEffect(() => { loadMap(); const t = setInterval(loadMap, 60_000); return () => clearInterval(t); }, [loadMap]);
@@ -326,7 +337,6 @@ try {
     // ── PASO 4: calcular ocupación real y actualizar BD ───────────
     log("⟳ Calculando ocupación real…");
 
-    type StockUpdate = { zona: string; localizador: string; ocupado: number; disponible: number; pct_ocupacion: number };
     const updates: StockUpdate[] = [];
     let withStock = 0, resetToZero = 0, notInDB = 0;
 
@@ -408,64 +418,29 @@ try {
       }
     }
 
-    // ── PASO 8: Plan de distribución PRODUCCION ───────────────────
-    const prodItems = subInvItems.filter(item =>
-      item.subinv.toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").includes("PRODUCCION")
-    );
-
-    if (prodItems.length > 0) {
-      log(`⟳ Calculando plan de distribución para ${prodItems.length} líneas PRODUCCION…`);
-      setLoadingPlan(true);
-
-      const { data: freshLocs } = await db
-        .from("localizadores")
-        .select("zona,localizador,capacidad,disponible,formato")
-        .eq("activo", true);
-
-      try {
-        const resp = await fetch("/api/analisis-bpt/plan", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: prodItems, locations: freshLocs || [], fullAnalysis: true }),
-        });
-        const data = await resp.json();
-        const { ok, plan, error: planErr } = data;
-        if (ok && plan) {
-          setSortingPlan(plan as PlanEntry[]);
-          setShowPlan(true);
-          // Extraer análisis completo si viene del backend Python
-          if (data.fragmentacion || data.alertas) {
-            setAnalisisData({
-              fragmentacion: data.fragmentacion ?? [],
-              consolidaciones: data.consolidaciones ?? [],
-              alertas: data.alertas ?? [],
-              resumen_formatos: data.resumen_formatos ?? [],
-              metricas: data.metricas ?? {},
-            });
-            setShowAnalisis(true);
-          }
-          const src = data._source === "typescript-fallback" ? " (TS)" : " (Python)";
-          log(`✅ Plan generado: ${(plan as PlanEntry[]).length} grupos${src}`, "ok");
-          if (data.metricas?.formatos_criticos_fragmentacion) {
-            log(`⚠ ${data.metricas.formatos_criticos_fragmentacion} formatos con fragmentación crítica`, "warn");
-          }
-          if (data.alertas) {
-            const criticos = (data.alertas as AlertaBodega[]).filter(a => a.nivel === "critico").length;
-            if (criticos > 0) log(`⚠ ${criticos} alertas críticas detectadas`, "warn");
-          }
-        } else {
-          log(`⚠ Plan no generado: ${planErr}`, "warn");
-        }
-      } catch {
-        log("⚠ Error generando plan de distribución", "warn");
-      } finally {
-        setLoadingPlan(false);
-      }
+    // ── PASO 8: Construir mapa por zona para selector ────────────
+    const byZoneMap: Record<string, FileLocData[]> = {};
+    for (const [loc, qty] of Object.entries(totalByLoc)) {
+      if (qty === 0) continue;
+      const dbInfo = dbMap[loc];
+      if (!dbInfo) continue;
+      const zona = dbInfo.zona;
+      const siItem = subInvItems.find(it => it.loc === loc);
+      const fmt = siItem?.formato || dbInfo.formato || "";
+      if (!byZoneMap[zona]) byZoneMap[zona] = [];
+      byZoneMap[zona].push({ loc, zona, formato: fmt, pallets: qty });
     }
+    const zonesFound = Object.keys(byZoneMap).sort();
+    setFileZones(zonesFound);
+    setFileByZone(byZoneMap);
+    setFileSubInvItems(subInvItems);
+    setSelZone("all");
+    setFormatRows([]);
+    setUploadPhase("zoneSelect");
 
     setProgress(100);
-    setProgressLabel(`✅ ${withStock} con stock · ${resetToZero} vacíos`);
-    log(`✅ Mapa actualizado: ${withStock} con stock, ${resetToZero} vacíos`, "ok");
+    setProgressLabel(`✅ ${withStock} con stock · ${zonesFound.length} zonas`);
+    log(`✅ Archivo procesado: ${withStock} con stock, ${zonesFound.length} zonas. Selecciona zona y localizador para continuar.`, "ok");
     setLastImportInfo(`Stock · ${withStock} c/stock · ${new Date().toLocaleTimeString("es-EC")}`);
   }
 
@@ -476,6 +451,70 @@ try {
 } finally {
   setImporting(false);
 }
+}
+// ── Ir a tabla de formatos/destinos ────────────────────────────────────
+function handleGoToFormat() {
+  const items = selZone === "all"
+    ? Object.values(fileByZone).flat()
+    : fileByZone[selZone] || [];
+  setFormatRows(items.map((d, i) => ({ _id: i, ...d, locDest: "" })));
+  setUploadPhase("formatCheck");
+}
+// ── Ejecutar plan para zona/localizador seleccionados ──────────────────
+async function handleExecutePlan() {
+  setLoadingPlan(true);
+  setSortingPlan([]);
+  setAnalisisData(null);
+  try {
+    const items = selZone === "all"
+      ? fileSubInvItems
+      : fileSubInvItems.filter(it => {
+          const zoneEntry = fileByZone[selZone];
+          return zoneEntry ? zoneEntry.some(l => l.loc === it.loc) : false;
+        });
+    const { data: freshLocs } = await db
+      .from("localizadores")
+      .select("zona,localizador,capacidad,disponible,formato")
+      .eq("activo", true);
+    const resp = await fetch("/api/analisis-bpt/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items, locations: freshLocs || [], fullAnalysis: true }),
+    });
+    const data = await resp.json();
+    if (data.ok && data.plan) {
+      setSortingPlan(data.plan as PlanEntry[]);
+      setShowPlan(true);
+      // Rellenar locDest en formatRows desde el plan
+      const locDestMap: Record<string, string> = {};
+      for (const entry of data.plan as PlanEntry[]) {
+        for (const asig of entry.asignaciones) {
+          if (!locDestMap[entry.lote]) locDestMap[entry.lote] = asig.loc;
+        }
+      }
+      setFormatRows(prev => prev.map(r => {
+        const related = (data.plan as PlanEntry[]).find(e =>
+          e.asignaciones.some(a => a.loc === r.loc) || r.loc === r.loc
+        );
+        const suggestion = related?.asignaciones?.[0]?.loc ?? "";
+        return r.locDest ? r : { ...r, locDest: suggestion };
+      }));
+      if (data.fragmentacion || data.alertas) {
+        setAnalisisData({
+          fragmentacion: data.fragmentacion ?? [],
+          consolidaciones: data.consolidaciones ?? [],
+          alertas: data.alertas ?? [],
+          resumen_formatos: data.resumen_formatos ?? [],
+          metricas: data.metricas ?? {},
+        });
+        setShowAnalisis(true);
+      }
+    }
+  } catch {
+    // plan error handled silently
+  } finally {
+    setLoadingPlan(false);
+  }
 }
 // ── Datos para render ──────────────────────────────────────────────────
 const zonasRender = fZone === "all" ? Object.keys(allData) : [fZone].filter(z => allData[z]);
@@ -524,7 +563,7 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
     onClick={() => fileRef.current?.click()}
     onDragOver={e => { e.preventDefault(); setDragging(true); }}
     onDragLeave={() => setDragging(false)}
-    onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) processExcel(f); }}
+    onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) { setUploadPhase("idle"); setFormatRows([]); processExcel(f); } }}
     style={{ margin: "14px 20px 0", border: `2px dashed ${dragging ? "#2563eb" : "#2e3247"}`, borderRadius: 10, padding: "13px 18px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", background: dragging ? "rgba(37,99,235,.06)" : "transparent", transition: "border-color .2s" }}
   >
     <div style={{ fontSize: 24 }}>📂</div>
@@ -542,7 +581,7 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
       Seleccionar Excel
     </button>
     <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
-      onChange={e => { const f = e.target.files?.[0]; if (f) { processExcel(f); e.target.value = ""; } }} />
+      onChange={e => { const f = e.target.files?.[0]; if (f) { setUploadPhase("idle"); setFormatRows([]); processExcel(f); e.target.value = ""; } }} />
   </div>
 
   {/* PROGRESS + LOG */}
@@ -559,6 +598,108 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
       {importLog.map((l, i) => (
         <div key={i} style={{ color: l.cls === "ok" ? "#4ade80" : l.cls === "err" ? "#f87171" : l.cls === "warn" ? "#fbbf24" : "#c8cad8", marginBottom: 2, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{l.msg}</div>
       ))}
+    </div>
+  )}
+
+  {/* ── SELECTOR DE ZONA ───────────────────────────────────────────────── */}
+  {uploadPhase === "zoneSelect" && fileZones.length > 0 && (
+    <div style={{ margin: "10px 20px 0", background: "#0d1a2b", border: "1px solid #1d4ed8", borderRadius: 10, padding: "14px 18px" }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#93c5fd", marginBottom: 10 }}>
+        ✓ Archivo leído · {fileZones.length} zonas detectadas · Selecciona zona y localizador a procesar
+      </div>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 10, color: "#5a5e75", marginBottom: 4, letterSpacing: 1 }}>ZONA</div>
+          <select value={selZone} onChange={e => setSelZone(e.target.value)}
+            style={{ fontSize: 12, padding: "6px 10px", border: "1px solid #2563eb", borderRadius: 6, background: "#0f1117", color: "#e8eaf0", outline: "none", minWidth: 160 }}>
+            <option value="all">Todas las zonas</option>
+            {fileZones.map(z => (
+              <option key={z} value={z}>{z} ({fileByZone[z]?.length ?? 0} loc)</option>
+            ))}
+          </select>
+        </div>
+        <div style={{ paddingTop: 18 }}>
+          <button onClick={handleGoToFormat}
+            style={{ padding: "7px 18px", background: "#2563eb", border: "none", borderRadius: 7, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", letterSpacing: 0.5 }}>
+            Ver formatos y localizador destino →
+          </button>
+        </div>
+        <div style={{ paddingTop: 18 }}>
+          <button onClick={() => setUploadPhase("idle")}
+            style={{ padding: "7px 12px", background: "transparent", border: "1px solid #374151", borderRadius: 7, color: "#5a5e75", fontSize: 12, cursor: "pointer" }}>
+            Cancelar
+          </button>
+        </div>
+      </div>
+      <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {fileZones.map(z => (
+          <span key={z} onClick={() => setSelZone(z)}
+            style={{ fontSize: 11, padding: "3px 10px", borderRadius: 5, cursor: "pointer",
+              background: selZone === z ? "#1d4ed8" : "#1e2235",
+              color: selZone === z ? "#93c5fd" : "#5a5e75",
+              border: selZone === z ? "1px solid #2563eb" : "1px solid #2e3247" }}>
+            {z} · {fileByZone[z]?.length ?? 0}
+          </span>
+        ))}
+      </div>
+    </div>
+  )}
+
+  {/* ── TABLA DE FORMATOS Y LOCALIZADOR DESTINO ─────────────────────────── */}
+  {uploadPhase === "formatCheck" && formatRows.length > 0 && (
+    <div style={{ margin: "10px 20px 0", background: "#0d1117", border: "1px solid #2e3247", borderRadius: 10, overflow: "hidden" }}>
+      <div style={{ background: "#1a1d27", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#e8eaf0" }}>
+            Formatos y localizador destino
+            {selZone !== "all" && <span style={{ fontSize: 11, color: "#60a5fa", marginLeft: 8 }}>· {selZone}</span>}
+          </div>
+          <div style={{ fontSize: 11, color: "#5a5e75", marginTop: 2 }}>{formatRows.length} localizadores con stock · edita el destino antes de ejecutar</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setUploadPhase("zoneSelect")}
+            style={{ padding: "6px 12px", background: "transparent", border: "1px solid #374151", borderRadius: 6, color: "#5a5e75", fontSize: 11, cursor: "pointer" }}>
+            ← Cambiar zona
+          </button>
+          <button onClick={handleExecutePlan} disabled={loadingPlan}
+            style={{ padding: "6px 16px", background: loadingPlan ? "#1d3a6e" : "#2563eb", border: "none", borderRadius: 6, color: "#fff", fontSize: 12, fontWeight: 700, cursor: loadingPlan ? "wait" : "pointer" }}>
+            {loadingPlan ? "⟳ Generando sugerencias…" : "Ejecutar y ver sugerencias →"}
+          </button>
+        </div>
+      </div>
+      <div style={{ overflowX: "auto", maxHeight: 340, overflowY: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+            <tr style={{ background: "#111827", borderBottom: "1px solid #2e3247" }}>
+              {["LOCALIZADOR", "ZONA", "FORMATO", "PALLETS", "LOCALIZADOR DESTINO"].map(h => (
+                <th key={h} style={{ padding: "8px 12px", textAlign: "left", color: "#5a5e75", fontWeight: 600, fontSize: 10, letterSpacing: 1, whiteSpace: "nowrap" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {formatRows.map((r, i) => (
+              <tr key={r._id} style={{ borderBottom: "1px solid #1e2235", background: i % 2 === 0 ? "transparent" : "#0d1117" }}>
+                <td style={{ padding: "6px 12px", fontWeight: 600, color: "#e8eaf0" }}>{r.loc}</td>
+                <td style={{ padding: "6px 12px", color: "#8b8fa8", fontSize: 11 }}>{r.zona}</td>
+                <td style={{ padding: "6px 12px" }}>
+                  {r.formato
+                    ? <span style={{ background: "#1e3a5f", color: "#60a5fa", padding: "2px 8px", borderRadius: 4, fontSize: 11 }}>{r.formato}</span>
+                    : <span style={{ color: "#374151" }}>—</span>}
+                </td>
+                <td style={{ padding: "6px 12px", textAlign: "right", color: "#4ade80", fontWeight: 700 }}>{r.pallets}</td>
+                <td style={{ padding: "6px 8px" }}>
+                  <input
+                    value={r.locDest}
+                    onChange={e => setFormatRows(prev => prev.map(x => x._id === r._id ? { ...x, locDest: e.target.value.toUpperCase() } : x))}
+                    placeholder="Sugerencia al ejecutar…"
+                    style={{ fontSize: 11, padding: "4px 8px", border: `1px solid ${r.locDest ? "#22c55e" : "#2e3247"}`, borderRadius: 5, background: "#0f1117", color: "#e8eaf0", outline: "none", width: 160, fontFamily: "monospace" }}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )}
 

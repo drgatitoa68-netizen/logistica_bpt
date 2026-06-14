@@ -7,7 +7,6 @@ import { logout } from "@/app/actions/auth";
 const NAV = [
   { href: "/dashboard",            icon: "⊞", label: "DASHBOARD" },
   { href: "/analisis-bpt",         icon: "⬡", label: "ANÁLISIS BPT" },
-  { href: "/subir-archivo",        icon: "📂", label: "SUBIR ARCHIVO" },
   { href: "/ordenes-produccion",   icon: "📋", label: "ÓRDENES" },
   { href: "/operador",             icon: "👷", label: "OPERADOR" },
   { href: "/configuracion",        icon: "⚙", label: "CONFIG" },
