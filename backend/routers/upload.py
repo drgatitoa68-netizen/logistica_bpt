@@ -306,6 +306,124 @@ async def _insert_produccion(db: Client, raw_rows: list[dict]) -> int:
     return len(inserts)
 
 
+# ── Preview / Validación ──────────────────────────────────────────────────────
+
+@router.post("/preview")
+async def preview_excel(
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+    db: Client = Depends(get_supabase_admin),
+):
+    """
+    Analiza el archivo sin escribir en BD.
+
+    - Mapa CAL_LOC   → devuelve conteo y formatos
+    - Producción     → enriquece filas con zona + formato del localizador destino
+    - Stock          → valida compatibilidad de formatos archivo vs BD
+    """
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .xlsx o .xls")
+
+    data = await file.read()
+    try:
+        wb = _open_wb(data)
+    except Exception:
+        raise HTTPException(status_code=422, detail="No se pudo leer el archivo Excel")
+
+    sheet_names = wb.sheetnames
+
+    # ── Mapa ─────────────────────────────────────────────────────────────────
+    if "CAL_LOC" in sheet_names:
+        records = _process_mapa(wb)
+        formatos = list({str(r.get("formato", "")) for r in records if r.get("formato")})
+        return {"type": "mapa", "count": len(records), "formatos": formatos}
+
+    # ── Producción ────────────────────────────────────────────────────────────
+    if any("PRODUCCION" in _norm(n) for n in sheet_names):
+        raw_rows = _process_produccion(wb)
+
+        dest_locs = list({r["localizador_destino"].upper() for r in raw_rows if r["localizador_destino"]})
+        loc_resp = db.from_("localizadores").select("zona,localizador,formato").in_("localizador", dest_locs).execute()
+        loc_map = {r["localizador"].strip().upper(): r for r in (loc_resp.data or [])}
+
+        rows_out = []
+        locs_not_found: list[str] = []
+        for i, r in enumerate(raw_rows):
+            loc_key = (r["localizador_destino"] or "").upper()
+            db_loc = loc_map.get(loc_key)
+            rows_out.append({
+                "_id": i,
+                **r,
+                "zona_destino": db_loc["zona"] if db_loc else "",
+                "formato_destino": (db_loc.get("formato") or "") if db_loc else "",
+                "loc_encontrado": db_loc is not None,
+            })
+            if loc_key and not db_loc and loc_key not in locs_not_found:
+                locs_not_found.append(loc_key)
+
+        return {"type": "produccion", "rows": rows_out, "locs_not_found": locs_not_found, "total": len(rows_out)}
+
+    # ── Stock ─────────────────────────────────────────────────────────────────
+    ws = wb.active
+    raw = list(ws.iter_rows(values_only=True))
+    col = _detect_header(raw)   # raises 422 si no hay LOCALIZADOR
+
+    # Localizadores de BD con formato
+    loc_resp = db.from_("localizadores").select("zona,localizador,formato").execute()
+    db_loc_map = {r["localizador"].strip().upper(): r for r in (loc_resp.data or [])}
+
+    # Leer (localizador → formato) del archivo  (última ocurrencia si hay varias)
+    file_locs: dict[str, str] = {}
+    for row in raw[col["header_row"] + 1:]:
+        raw_loc = str(row[col["loc"]] or "").strip()
+        if not raw_loc:
+            continue
+        loc_key = raw_loc.upper()
+        fmt = str(row[col["formato"]] or "").strip() if col["formato"] >= 0 else ""
+        file_locs[loc_key] = fmt
+
+    has_format_col = col["formato"] >= 0
+
+    # Construir format_checks
+    format_checks = []
+    for loc_key, fmt_archivo in file_locs.items():
+        db_loc = db_loc_map.get(loc_key)
+        if db_loc:
+            fmt_db = (db_loc.get("formato") or "").strip()
+            comodin = not fmt_db or fmt_db.upper() in ("MEZCLA", "MIX", "VACIO")
+            match = not fmt_archivo or comodin or fmt_archivo.upper() == fmt_db.upper()
+            format_checks.append({
+                "localizador": loc_key,
+                "zona": db_loc["zona"],
+                "formato_archivo": fmt_archivo,
+                "formato_db": fmt_db,
+                "match": match,
+                "en_db": True,
+            })
+        else:
+            format_checks.append({
+                "localizador": loc_key,
+                "zona": "",
+                "formato_archivo": fmt_archivo,
+                "formato_db": "",
+                "match": False,
+                "en_db": False,
+            })
+
+    mismatches = sum(1 for c in format_checks if not c["match"] and c["en_db"])
+    not_in_db = sum(1 for c in format_checks if not c["en_db"])
+
+    return {
+        "type": "stock",
+        "has_format_col": has_format_col,
+        "total_locs": len(file_locs),
+        "locs_in_db": sum(1 for k in file_locs if k in db_loc_map),
+        "format_checks": format_checks,
+        "mismatches_count": mismatches,
+        "not_in_db_count": not_in_db,
+    }
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/excel")
