@@ -612,7 +612,7 @@ export default function UbicacionProduccionPage() {
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))", gap: 8 }}>
             {Array.from(productosAgrupados.values())
-              .sort((a, b) => (b.pallets + (b.cajas > 0 ? 1 : 0)) - (a.pallets + (a.cajas > 0 ? 1 : 0)))
+              .sort((a, b) => (b.pallets + b.cajas) - (a.pallets + a.cajas))
               .map((prod, idx) => (
                 <div key={idx} style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 2, padding: "8px 10px", fontSize: 10 }}>
                   <div style={{ fontWeight: 700, color: "#f97316", marginBottom: 4, fontFamily: "monospace" }}>

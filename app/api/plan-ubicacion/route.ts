@@ -13,6 +13,7 @@ export interface StockItem {
   cantidad_fisica: number;
   pallets: number;
   cajas: number;
+  cajas_por_pallet?: number;
   responsable: string;
   conteo: number | null;
   formato?: string;      // campo explícito para R1 (viene de analisis-bpt o ubicacion-produccion)
@@ -182,7 +183,15 @@ function computePlan(
   items: StockItem[],
   locations: LocationIn[],
   existingLots: Set<string>,
+  cajasPerPallet: Map<string, number> = new Map(),
 ): AssignedLine[] {
+
+  const calcEffPallets = (item: StockItem): number => {
+    if (item.cajas <= 0) return item.pallets;
+    const cpp = item.cajas_por_pallet || cajasPerPallet.get(item.codigo) || 0;
+    const cajasAsPallets = cpp > 0 ? Math.ceil(item.cajas / cpp) : 1;
+    return item.pallets + cajasAsPallets;
+  };
 
   // Pool: R3 — solo localizadores activos con espacio
   const pool = new Map<string, LocState>();
@@ -236,7 +245,7 @@ function computePlan(
     }
 
     const codeGroup = codeMap.get(item.codigo)!;
-    const effPallets = item.pallets + (item.cajas > 0 ? 1 : 0);
+    const effPallets = calcEffPallets(item);
     codeGroup.totalPalletsCode += effPallets;
 
     if (!codeGroup.lotes.has(item.lote)) {
@@ -270,7 +279,7 @@ function computePlan(
     // Para cada lote de este código
     for (const lotGroup of sortedLotes) {
       for (const item of lotGroup.items) {
-        const effPallets = item.pallets + (item.cajas > 0 ? 1 : 0);
+        const effPallets = calcEffPallets(item);
         
         if (effPallets === 0) {
           result.push({
@@ -466,10 +475,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const sb = await createClient();
+
     // Consultar inventario actual para R4 (yaTieneLote)
     let existingLots = new Set<string>();
     try {
-      const sb = await createClient();
       const { data: invRows } = await sb
         .from("inventario")
         .select("localizador,codigo,lote")
@@ -483,10 +493,30 @@ export async function POST(req: NextRequest) {
       // inventario puede no existir aún; continuar sin bonus R4
     }
 
+    // Consultar cajas_por_pallet del catálogo para calcular pallets efectivos correctamente
+    const cajasPerPallet = new Map<string, number>();
+    try {
+      const codigos = [...new Set((items as StockItem[]).map(i => i.codigo).filter(Boolean))];
+      if (codigos.length > 0) {
+        const { data: catRows } = await sb
+          .from("catalogo_productos")
+          .select("codigo,cajas_por_pallet")
+          .in("codigo", codigos);
+        for (const row of catRows ?? []) {
+          if (row.codigo && row.cajas_por_pallet) {
+            cajasPerPallet.set(row.codigo, Number(row.cajas_por_pallet));
+          }
+        }
+      }
+    } catch {
+      // catálogo no disponible; se usará fallback de 1 pallet por grupo de cajas
+    }
+
     const plan = computePlan(
       items as StockItem[],
       locations as LocationIn[],
       existingLots,
+      cajasPerPallet,
     );
 
     const sinEspacio = plan.filter(l => l.sin_espacio).length;
