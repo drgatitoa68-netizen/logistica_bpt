@@ -3,29 +3,16 @@ import { useEffect, useState, useRef, useCallback } from "react"; import * as XL
 import { getBrowserClient } from "@/lib/supabase/browser";
 const db = getBrowserClient();
 // ── Tipos ──────────────────────────────────────────────────────────────────
-// Forma de respuesta de /api/plan-ubicacion usada en procesarComoLineas
-interface PlanLine {
-  row_idx: number; cod_org_inv: string; codigo: string; descripcion: string;
-  subinventario_origen: string; localizador_origen: string; lote: string;
-  cantidad_fisica: number; pallets: number; cajas: number;
-  pallets_efectivos: number;
-  subinventario_destino: string; localizador_destino: string;
-  inv_pe: number; sin_espacio: boolean; is_fragment: boolean;
-}
 interface Localizador { zona: string; localizador: string; formato?: string; capacidad: number; ocupado: number; disponible: number; pct_ocupacion: number; activo?: boolean; }
-interface SubInvItem {
-  loc: string; subinv: string; formato: string; lote: string; pallets: number;
-  cantidad_fisica?: number; codigo?: string; descripcion?: string; cod_org_inv?: string;
-  nombre_org_inv?: string; nombre_subinv?: string; um?: string; peso?: number;
-  um_peso?: string; tipo_inventario?: string; calidad?: string; marca?: string;
-  estado_inventario?: string; estado?: string; m2_x_caja?: number;
-  can_reservada?: number; dispo_reservar?: number; um_sec?: string;
-  cantidad_fisica_sec?: number; lote_status?: string;
-}
-interface Asignacion { loc: string; zona: string; palletsAsignados: number; }
-interface PlanEntry { formato: string; lote: string; palletsNeed: number; asignaciones: Asignacion[]; palletsAsignados: number; palletsRestantes: number; }
+interface SubInvItem { loc: string; subinv: string; formato: string; lote: string; pallets: number; codigo?: string; }
+interface Asignacion { loc: string; zona: string; palletsAsignados: number; prioridad?: string; }
+interface PlanEntry { formato: string; lote: string; palletsNeed: number; asignaciones: Asignacion[]; palletsAsignados: number; palletsRestantes: number; cobertura_pct?: number; }
+interface FragmentacionItem { formato: string; total_pallets: number; num_localizadores: number; nivel: string; indice: number; }
+interface Consolidacion { formato: string; lote: string; locs_origen: string[]; loc_destino: string; zona_destino: string; pallets_a_mover: number; beneficio: string; }
+interface AlertaBodega { nivel: string; mensaje: string; detalle?: string; }
+interface ResumenFormato { formato: string; total_pallets: number; m2_estimado?: number; locs_propios: number; locs_ocupados: number; cobertura_pct: number; }
+interface AnalisisData { fragmentacion: FragmentacionItem[]; consolidaciones: Consolidacion[]; alertas: AlertaBodega[]; resumen_formatos: ResumenFormato[]; metricas: Record<string, unknown>; }
 interface TooltipData { d: Localizador; zona: string; x: number; y: number; } interface SelectedLoc { d: Localizador; zona: string; }
-interface Movimiento { codigo: string; lote: string; origen_localizador: string; origen_subinventario: string; origen_pallets: number; destino_localizador: string; destino_subinventario: string; destino_pallets: number; }
 // ── Colores ocupación ──────────────────────────────────────────────────────
 const C = { empty: "#1e293b", low: "#639922", mid: "#1D9E75", high: "#BA7517", full: "#E24B4A", over: "#7A1F1F", };
 function getColor(p: number) { if (p <= 0) return C.empty; if (p < 0.5) return C.low; if (p < 0.8) return C.mid; if (p < 1.0) return C.high; if (p < 1.1) return C.full; return C.over; }
@@ -39,18 +26,13 @@ const CAL_LOC_COL = { ZONA: 1, LOC: 2, FORMATO: 3, CAPACIDAD: 10, OCUPADO: 14, D
 export default function AnalisisBPTPage() { const [allData, setAllData] = useState<Record<string, Localizador[]>>({}); const [loading, setLoading] = useState(true); const [connOk, setConnOk] = useState<boolean | null>(null); const [lastUpdate, setLastUpdate] = useState(""); const [lastImportInfo, setLastImportInfo] = useState("");
 const [fZone, setFZone] = useState("all"); const [fStatus, setFStatus] = useState("all"); const [fSearch, setFSearch] = useState("");
 const [subInvStock, setSubInvStock] = useState<Record<string, Record<string, number>>>({}); const [allSubInvs, setAllSubInvs] = useState<string[]>([]); const [selectedSubInv, setSelectedSubInv] = useState("all");
-const [storedItems, setStoredItems] = useState<SubInvItem[]>([]); const [procesando, setProcesando] = useState(false); const [procesadoInfo, setProcesadoInfo] = useState<{ count: number; subinv: string } | null>(null);
 // Plan de distribución
 const [sortingPlan, setSortingPlan] = useState<PlanEntry[]>([]);
+const [analisisData, setAnalisisData] = useState<AnalisisData | null>(null);
 const [loadingPlan, setLoadingPlan] = useState(false);
 const [showPlan, setShowPlan] = useState(false);
+const [showAnalisis, setShowAnalisis] = useState(false);
 const [planFilter, setPlanFilter] = useState("");
-// Consolidación
-const [consolidacion, setConsolidacion] = useState<Movimiento[] | null>(null);
-const [loadingConsol, setLoadingConsol] = useState(false);
-const [showConsol, setShowConsol] = useState(false);
-const [umbralConsol, setUmbralConsol] = useState(2);
-const [consolFilter, setConsolFilter] = useState("");
 const [tooltip, setTooltip] = useState<TooltipData | null>(null); const [selectedLoc, setSelectedLoc] = useState<SelectedLoc | null>(null); const [viewMode, setViewMode] = useState<"map" | "table">("map");
 const [importLog, setImportLog] = useState<{ msg: string; cls: string }[]>([]); const [progress, setProgress] = useState(0); const [progressLabel, setProgressLabel] = useState(""); const [importing, setImporting] = useState(false); const [dragging, setDragging] = useState(false);
 const fileRef = useRef<HTMLInputElement>(null); const logRef = useRef<HTMLDivElement>(null);
@@ -64,25 +46,7 @@ function matchFilter(p: number) { if (fStatus === "all") return true; if (fStatu
 const allLocs = Object.values(allData).flat(); const totalCap = allLocs.reduce((s, d) => s + (d.capacidad || 0), 0); const totalOcup = allLocs.reduce((s, d) => s + (d.ocupado || 0), 0); const avgGlobal = totalCap > 0 ? totalOcup / totalCap : 0; const subInvMap = selectedSubInv !== "all" ? (subInvStock[selectedSubInv] ?? {}) : null; const subInvStats = subInvMap ? (() => { const keys = Object.keys(subInvMap); const total = keys.reduce((s, k) => s + (subInvMap[k] || 0), 0); return { locs: keys.length, total }; })() : null; const totalPalletsLibres = allLocs.reduce((s, d) => s + Math.max(0, d.disponible || 0), 0);
 const stats = [ { v: allLocs.length, l: "Localizadores" }, { v: Object.keys(allData).length, l: "Zonas" }, { v: (avgGlobal * 100).toFixed(1) + "%", l: "Ocupación global" }, { v: allLocs.filter(d => d.ocupado > 0).length, l: "Con stock" }, { v: totalPalletsLibres, l: "Pallets libres" }, { v: allLocs.filter(d => d.pct_ocupacion > 1.0).length, l: "Con exceso" }, ];
 // ── Detectar columnas del Excel ─────────────────────────────────────────
-function detectHeader(rows: unknown[][]): {
-  headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number;
-  cantColIdx: number; cantFisicaColIdx: number; subInvColIdx: number; formatoColIdx: number;
-  loteColIdx: number; codigoColIdx: number; descColIdx: number; codOrgColIdx: number;
-  nombreOrgColIdx: number; nombreSubColIdx: number; umColIdx: number; pesoColIdx: number;
-  umPesoColIdx: number; tipoInvColIdx: number; calidadColIdx: number; marcaColIdx: number;
-  estadoInvColIdx: number; estadoColIdx: number; m2CajaColIdx: number;
-  canReservColIdx: number; dispoReservColIdx: number; umSecColIdx: number;
-  canFisSecColIdx: number; loteStatusColIdx: number;
-} {
-  let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1, cajasColIdx = -1;
-  let cantColIdx = -1, cantFisicaColIdx = -1, subInvColIdx = -1;
-  let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1, descColIdx = -1, codOrgColIdx = -1;
-  let nombreOrgColIdx = -1, nombreSubColIdx = -1, umColIdx = -1, pesoColIdx = -1;
-  let umPesoColIdx = -1, tipoInvColIdx = -1, calidadColIdx = -1, marcaColIdx = -1;
-  let estadoInvColIdx = -1, estadoColIdx = -1, m2CajaColIdx = -1;
-  let canReservColIdx = -1, dispoReservColIdx = -1, umSecColIdx = -1;
-  let canFisSecColIdx = -1, loteStatusColIdx = -1;
-
+function detectHeader(rows: unknown[][]): { headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number; cantColIdx: number; subInvColIdx: number; formatoColIdx: number; loteColIdx: number; codigoColIdx: number; } { let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1; let cajasColIdx = -1, cantColIdx = -1, subInvColIdx = -1; let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1;
 for (let i = 0; i < Math.min(30, rows.length); i++) {
   const row = (rows[i] as unknown[]).map(c =>
     String(c).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
@@ -112,41 +76,20 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
      c === "NUMERO LOTE" || c === "NRO_LOTE" || c.startsWith("LOTE"))
   );
 
-  // ── ORDEN IMPORTANTE: codOrgColIdx ANTES que codigoColIdx ──────────────
-  // "Codigo Org Inv" empieza con "COD" igual que "Código" — detectar el más
-  // específico primero para evitar que se asigne al índice equivocado.
-  const codOrgKw = ["COD ORG INV", "CODIGO ORG INV", "COD.ORG.INV", "CODORGINV", "CODORG INV", "CODIGO ORG"];
-  for (const kw of codOrgKw) {
-    const oi = row.findIndex((c, idx) =>
-      idx !== li && idx !== subInvColIdx && idx !== formatoColIdx && idx !== loteColIdx &&
-      (c === kw || c.startsWith(kw))
-    );
-    if (oi >= 0) { codOrgColIdx = oi; break; }
-  }
-
-  // Código del producto (excluye codOrgColIdx ya asignado)
-  const codKw = ["CODIGO", "COD", "CODART", "COD ART", "ARTICULO", "ITEM", "SKU"];
-  for (const kw of codKw) {
+  for (const kw of ["CODIGO", "COD PROD", "COD ART", "COD ARTICULO", "COD PRODUCTO", "COD ITEM"]) {
     const ci = row.findIndex((c, idx) =>
-      idx !== li && idx !== subInvColIdx && idx !== formatoColIdx &&
-      idx !== loteColIdx && idx !== codOrgColIdx &&
-      (c === kw || c.startsWith(kw))
+      idx !== li && idx !== subInvColIdx && idx !== formatoColIdx && idx !== loteColIdx && c === kw
     );
     if (ci >= 0) { codigoColIdx = ci; break; }
   }
-
-  // Descripción
-  const descKw = ["DESCRIPCION", "DESCRIPCI", "DESC", "PRODUCTO", "NOMBRE PRODUCTO"];
-  for (const kw of descKw) {
-    const di = row.findIndex((c, idx) =>
-      idx !== li && idx !== subInvColIdx && idx !== formatoColIdx &&
-      idx !== loteColIdx && idx !== codigoColIdx && idx !== codOrgColIdx &&
-      (c === kw || c.startsWith(kw))
+  if (codigoColIdx < 0) {
+    const ci = row.findIndex((c, idx) =>
+      idx !== li && idx !== subInvColIdx && idx !== formatoColIdx && idx !== loteColIdx &&
+      (c === "COD" || (c.startsWith("COD") && c.length <= 7 && !c.includes("ORG") && !c.includes("INV")))
     );
-    if (di >= 0) { descColIdx = di; break; }
+    if (ci >= 0) codigoColIdx = ci;
   }
 
-  // Pallets / Tarimas
   const tarimKw = ["TARIMA", "TARIMAS", "PALLET", "PALLETS", "ESTIBA",
                    "NRO TARIMA", "NTAR", "NUM TARIMA", "PALETA", "PALETAS"];
   for (const kw of tarimKw) {
@@ -156,7 +99,6 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
     if (ti >= 0) { tarimasColIdx = ti; break; }
   }
 
-  // Cajas
   const cajaKw = ["CAJAS", "CAJA", "BOXES", "BOX", "FRACCION", "FRACCIONES",
                   "SALDO CAJA", "SALDO_CAJA", "UNIDADES SUELTAS", "SUELTAS"];
   for (const kw of cajaKw) {
@@ -167,30 +109,17 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
     if (ci2 >= 0) { cajasColIdx = ci2; break; }
   }
 
-  // Can Física (m² reales del producto — UM=M2)
-  const canFisKw = ["CAN FISICA", "CAN.FISICA", "CANTIDAD FISICA", "CANT FISICA",
-                    "CANT.FISICA", "CANTIDAD_FISICA", "CANFISICA"];
-  for (const kw of canFisKw) {
-    const fi = row.findIndex((c, idx) =>
-      idx !== li && idx !== subInvColIdx && idx !== tarimasColIdx && idx !== cajasColIdx &&
-      (c === kw || c.startsWith(kw))
-    );
-    if (fi >= 0) { cantFisicaColIdx = fi; break; }
-  }
-
-  // Cantidad genérica (fallback si no hay PALLETS ni CAN FISICA)
   const qKw = ["CANTIDAD", "CANT", "QTY", "STOCK", "SALDO",
                "TOTAL UOM", "TOTAL_UOM", "TOTAL", "UNIDADES", "UND"];
   for (const kw of qKw) {
     const qi = row.findIndex((c, idx) =>
-      idx !== li && idx !== subInvColIdx && idx !== tarimasColIdx &&
-      idx !== cajasColIdx && idx !== cantFisicaColIdx &&
+      idx !== li && idx !== subInvColIdx && idx !== tarimasColIdx && idx !== cajasColIdx &&
       (c === kw || c.startsWith(kw))
     );
     if (qi >= 0) { cantColIdx = qi; break; }
   }
 
-  if (tarimasColIdx < 0 && cantColIdx < 0 && cantFisicaColIdx < 0) {
+  if (tarimasColIdx < 0 && cantColIdx < 0) {
     const nr = (rows[Math.min(i + 1, rows.length - 1)] as unknown[]);
     for (let ci = li + 1; ci < row.length; ci++) {
       if (ci === subInvColIdx) continue;
@@ -198,38 +127,9 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
       if (v && !isNaN(parseFloat(v))) { cantColIdx = ci; break; }
     }
   }
-
-  // ── Columnas extendidas (segunda pasada sobre el mismo row) ──────────
-  const usedPrimary = new Set([locColIdx, subInvColIdx, formatoColIdx, loteColIdx,
-    codOrgColIdx, codigoColIdx, descColIdx, tarimasColIdx, cajasColIdx,
-    cantFisicaColIdx, cantColIdx].filter(x => x >= 0));
-  const findExtra = (kws: string[]) => row.findIndex((c, idx) =>
-    !usedPrimary.has(idx) && kws.some(kw => c === kw || c.startsWith(kw))
-  );
-  nombreOrgColIdx   = findExtra(["NOMBRE ORG INV", "NOMBRE ORG"]);
-  nombreSubColIdx   = findExtra(["NOMBRE SUBINVENTARIO", "NOMBRE SUB INVENTARIO", "NOMBRE SUBINV"]);
-  umColIdx          = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "UM");
-  pesoColIdx        = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "PESO");
-  umPesoColIdx      = findExtra(["UM PESO"]);
-  tipoInvColIdx     = findExtra(["TIPO INVENTARIO"]);
-  calidadColIdx     = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "CALIDAD");
-  marcaColIdx       = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "MARCA");
-  estadoInvColIdx   = findExtra(["ESTADO INVENTARIO"]);
-  estadoColIdx      = row.findIndex((c, idx) => !usedPrimary.has(idx) && c === "ESTADO" && idx !== estadoInvColIdx);
-  m2CajaColIdx      = findExtra(["M2 X CAJA", "M2XCAJA", "M2 CAJA"]);
-  canReservColIdx   = findExtra(["CAN RESERVADA", "CANT RESERVADA"]);
-  dispoReservColIdx = findExtra(["DISPO RESERVAR"]);
-  umSecColIdx       = findExtra(["UM SEC"]);
-  canFisSecColIdx   = findExtra(["CAN FISICA SEC", "CANTIDAD FISICA SEC"]);
-  loteStatusColIdx  = findExtra(["LOTE STATUS", "STATUS LOTE"]);
-
   break;
 }
-return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, cantFisicaColIdx,
-         subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgColIdx,
-         nombreOrgColIdx, nombreSubColIdx, umColIdx, pesoColIdx, umPesoColIdx, tipoInvColIdx,
-         calidadColIdx, marcaColIdx, estadoInvColIdx, estadoColIdx, m2CajaColIdx,
-         canReservColIdx, dispoReservColIdx, umSecColIdx, canFisSecColIdx, loteStatusColIdx };
+return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx };
 }
 // ── Procesar Excel ─────────────────────────────────────────────────────
 async function processExcel(file: File) { setImporting(true); setProgress(0); setProgressLabel(""); setImportLog([]);
@@ -267,8 +167,7 @@ try {
         zona, localizador: loc,
         formato: String(r[CAL_LOC_COL.FORMATO] || "Mezcla").trim(),
         capacidad: cap, ocupado: ocup, disponible: disp,
-        pct_ocupacion: Math.round(pct * 10000) / 10000,
-        // activo no se incluye → localizadores bloqueados conservan su estado
+        pct_ocupacion: Math.round(pct * 10000) / 10000, activo: true,
       });
     }
 
@@ -301,12 +200,7 @@ try {
     setProgress(8);
 
     log("⟳ Detectando estructura del archivo…");
-    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, cantFisicaColIdx,
-            subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgColIdx,
-            nombreOrgColIdx, nombreSubColIdx, umColIdx, pesoColIdx, umPesoColIdx, tipoInvColIdx,
-            calidadColIdx, marcaColIdx, estadoInvColIdx, estadoColIdx, m2CajaColIdx,
-            canReservColIdx, dispoReservColIdx, umSecColIdx, canFisSecColIdx, loteStatusColIdx,
-          } = detectHeader(rows);
+    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx } = detectHeader(rows);
 
     if (headerRowIdx < 0 || locColIdx < 0) {
       const preview = rows.slice(0, 8).map((r, i) =>
@@ -323,6 +217,7 @@ try {
       `✓ Estructura detectada (fila ${headerRowIdx + 1}):\n` +
       `  LOC       → col ${locColIdx + 1}: "${headers[locColIdx]}"\n` +
       (subInvColIdx  >= 0 ? `  SUBINV    → col ${subInvColIdx + 1}: "${headers[subInvColIdx]}"\n`  : `  SUBINV    → no encontrado\n`) +
+      (codigoColIdx  >= 0 ? `  CODIGO    → col ${codigoColIdx + 1}: "${headers[codigoColIdx]}"\n`  : `  CODIGO    → no encontrado (se usará catálogo si hay formato vacío)\n`) +
       (formatoColIdx >= 0 ? `  FORMATO   → col ${formatoColIdx + 1}: "${headers[formatoColIdx]}"\n` : `  FORMATO   → no encontrado\n`) +
       (loteColIdx    >= 0 ? `  LOTE      → col ${loteColIdx + 1}: "${headers[loteColIdx]}"\n`      : `  LOTE      → no encontrado\n`) +
       (tarimasColIdx >= 0 ? `  PALLETS   → col ${tarimasColIdx + 1}: "${headers[tarimasColIdx]}"\n` : `  PALLETS   → no encontrado\n`) +
@@ -365,30 +260,15 @@ try {
 
       // Acumular por subinventario
       if (subInvColIdx >= 0) {
-        const si      = String(r[subInvColIdx]    || "").trim();
-        const fmt     = formatoColIdx    >= 0 ? String(r[formatoColIdx]    || "").trim() : "";
-        const lot     = loteColIdx       >= 0 ? String(r[loteColIdx]       || "").trim() : "";
-        const cod     = codigoColIdx     >= 0 ? String(r[codigoColIdx]     || "").trim() : "";
-        const desc    = descColIdx       >= 0 ? String(r[descColIdx]       || "").trim() : "";
-        const codOrg  = codOrgColIdx     >= 0 ? String(r[codOrgColIdx]     || "").trim() : "";
-        const canFis  = cantFisicaColIdx >= 0 ? parseFloat(String(r[cantFisicaColIdx] || "0").replace(",", ".")) || 0 : 0;
+        const si  = String(r[subInvColIdx] || "").trim();
+        const fmt = formatoColIdx >= 0 ? String(r[formatoColIdx] || "").trim() : "";
+        const lot = loteColIdx    >= 0 ? String(r[loteColIdx]    || "").trim() : "";
         if (si) {
           subInvSet.add(si);
           if (!bySubInv[si]) bySubInv[si] = {};
           bySubInv[si][loc] = (bySubInv[si][loc] ?? 0) + pallets;
-          const str = (ci: number) => ci >= 0 ? String(r[ci] || "").trim() || undefined : undefined;
-          const num = (ci: number) => ci >= 0 ? parseFloat(String(r[ci] || "").replace(",", ".")) || undefined : undefined;
-          subInvItems.push({
-            loc, subinv: si, formato: fmt, lote: lot, pallets,
-            cantidad_fisica: canFis || undefined, codigo: cod, descripcion: desc, cod_org_inv: codOrg,
-            nombre_org_inv: str(nombreOrgColIdx), nombre_subinv: str(nombreSubColIdx),
-            um: str(umColIdx), peso: num(pesoColIdx), um_peso: str(umPesoColIdx),
-            tipo_inventario: str(tipoInvColIdx), calidad: str(calidadColIdx), marca: str(marcaColIdx),
-            estado_inventario: str(estadoInvColIdx), estado: str(estadoColIdx),
-            m2_x_caja: num(m2CajaColIdx), can_reservada: num(canReservColIdx),
-            dispo_reservar: num(dispoReservColIdx), um_sec: str(umSecColIdx),
-            cantidad_fisica_sec: num(canFisSecColIdx), lote_status: str(loteStatusColIdx),
-          });
+          const cod = codigoColIdx >= 0 ? String(r[codigoColIdx] || "").trim() : "";
+          subInvItems.push({ loc, subinv: si, formato: fmt, lote: lot, pallets, codigo: cod });
         }
       }
     }
@@ -482,55 +362,6 @@ try {
       setProgressLabel(`Actualizando BD… ${done}/${updates.length}`);
     }
 
-    // ── PASO 5b: upsert a inventario via RPC + recalcular ocupación ──
-    if (subInvItems.length > 0) {
-      log("⟳ Actualizando tabla inventario…");
-      const bySubInvGroups = new Map<string, typeof subInvItems>();
-      for (const item of subInvItems) {
-        if (!item.subinv) continue;
-        if (!bySubInvGroups.has(item.subinv)) bySubInvGroups.set(item.subinv, []);
-        bySubInvGroups.get(item.subinv)!.push(item);
-      }
-      for (const [si, siItems] of bySubInvGroups) {
-        const rows = siItems
-          .filter(item => dbMap[item.loc.toUpperCase()])
-          .map(item => ({
-            codigo:              item.codigo            || "",
-            lote:                item.lote              || null,
-            localizador:         item.loc,
-            subinventario:       item.subinv,
-            descripcion:         item.descripcion       || null,
-            pallets:             item.pallets,
-            cajas:               0,
-            cantidad_fisica:     item.cantidad_fisica   ?? null,
-            formato:             item.formato           || null,
-            cod_org_inv:         item.cod_org_inv       || null,
-            nombre_org_inv:      item.nombre_org_inv    || null,
-            nombre_subinv:       item.nombre_subinv     || null,
-            um:                  item.um                || null,
-            peso:                item.peso              ?? null,
-            um_peso:             item.um_peso           || null,
-            tipo_inventario:     item.tipo_inventario   || null,
-            calidad:             item.calidad           || null,
-            marca:               item.marca             || null,
-            estado_inventario:   item.estado_inventario || null,
-            estado:              item.estado            || null,
-            m2_x_caja:          item.m2_x_caja         ?? null,
-            can_reservada:       item.can_reservada     ?? null,
-            dispo_reservar:      item.dispo_reservar    ?? null,
-            um_sec:              item.um_sec            || null,
-            cantidad_fisica_sec: item.cantidad_fisica_sec ?? null,
-            lote_status:         item.lote_status       || null,
-          }));
-        const { error: rpcErr } = await db.rpc("importar_subinventario", {
-          p_subinventario: si,
-          p_rows: rows,
-        });
-        if (rpcErr) throw new Error(`importar_subinventario ${si}: ${rpcErr.message}`);
-        log(`✅ Inventario actualizado: ${si} (${rows.length} registros)`, "ok");
-      }
-    }
-
     // ── PASO 6: guardar subinventarios en estado ──────────────────
     if (Object.keys(bySubInv).length > 0) {
       const normalizedBySubInv: Record<string, Record<string, number>> = {};
@@ -542,20 +373,42 @@ try {
       }
       setSubInvStock(normalizedBySubInv);
       setAllSubInvs(subInvArr);
-      setStoredItems(subInvItems); // persist for PROCESAR button
-      setProcesadoInfo(null);
       const prodKey = subInvArr.find(s =>
         s.toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").includes("PRODUCCION")
       );
       if (prodKey) setSelectedSubInv(prodKey);
-      log(`✓ ${subInvArr.length} subinventarios cargados — selecciona uno y presiona PROCESAR para crear líneas`);
+      log(`✓ ${subInvArr.length} subinventarios cargados para visualización`);
     }
 
     setProgress(90);
     setProgressLabel("Recargando mapa…");
     await loadMap();
 
-    // ── PASO 7: Plan de distribución PRODUCCION ───────────────────
+    // ── PASO 7: Enriquecer formato desde catálogo_productos ───────
+    const allCodigos = [...new Set(subInvItems.map(it => it.codigo).filter((c): c is string => !!c))];
+    if (allCodigos.length > 0) {
+      const { data: catData } = await db
+        .from("catalogo_productos")
+        .select("codigo,formato,cajas_por_pallet")
+        .in("codigo", allCodigos);
+      if (catData && catData.length > 0) {
+        type CatEntry = { codigo: string; formato: string; cajas_por_pallet: number };
+        const catMap: Record<string, CatEntry> = {};
+        for (const c of catData as CatEntry[]) catMap[c.codigo] = c;
+        let enriched = 0;
+        for (const item of subInvItems) {
+          const cat = item.codigo ? catMap[item.codigo] : undefined;
+          if (!cat) continue;
+          if (!item.formato && cat.formato) { item.formato = cat.formato; enriched++; }
+        }
+        log(enriched > 0
+          ? `✓ Catálogo: ${enriched} formatos completados desde catalogo_productos`
+          : `✓ Catálogo: ${catData.length} productos consultados (formatos ya presentes en Excel)`
+        );
+      }
+    }
+
+    // ── PASO 8: Plan de distribución PRODUCCION ───────────────────
     const prodItems = subInvItems.filter(item =>
       item.subinv.toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").includes("PRODUCCION")
     );
@@ -573,13 +426,33 @@ try {
         const resp = await fetch("/api/analisis-bpt/plan", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: prodItems, locations: freshLocs || [] }),
+          body: JSON.stringify({ items: prodItems, locations: freshLocs || [], fullAnalysis: true }),
         });
-        const { ok, plan, error: planErr } = await resp.json();
+        const data = await resp.json();
+        const { ok, plan, error: planErr } = data;
         if (ok && plan) {
-          setSortingPlan(plan);
+          setSortingPlan(plan as PlanEntry[]);
           setShowPlan(true);
-          log(`✅ Plan generado: ${(plan as PlanEntry[]).length} grupos (formato+lote)`, "ok");
+          // Extraer análisis completo si viene del backend Python
+          if (data.fragmentacion || data.alertas) {
+            setAnalisisData({
+              fragmentacion: data.fragmentacion ?? [],
+              consolidaciones: data.consolidaciones ?? [],
+              alertas: data.alertas ?? [],
+              resumen_formatos: data.resumen_formatos ?? [],
+              metricas: data.metricas ?? {},
+            });
+            setShowAnalisis(true);
+          }
+          const src = data._source === "typescript-fallback" ? " (TS)" : " (Python)";
+          log(`✅ Plan generado: ${(plan as PlanEntry[]).length} grupos${src}`, "ok");
+          if (data.metricas?.formatos_criticos_fragmentacion) {
+            log(`⚠ ${data.metricas.formatos_criticos_fragmentacion} formatos con fragmentación crítica`, "warn");
+          }
+          if (data.alertas) {
+            const criticos = (data.alertas as AlertaBodega[]).filter(a => a.nivel === "critico").length;
+            if (criticos > 0) log(`⚠ ${criticos} alertas críticas detectadas`, "warn");
+          }
         } else {
           log(`⚠ Plan no generado: ${planErr}`, "warn");
         }
@@ -604,125 +477,7 @@ try {
   setImporting(false);
 }
 }
-// ── PROCESAR: crea lineas_reubicacion usando /api/plan-ubicacion ──────────
-async function procesarComoLineas() {
-  const items = storedItems.filter(item => item.subinv === selectedSubInv);
-  if (!items.length) { alert(`No hay ítems para ${selectedSubInv}`); return; }
-  setProcesando(true);
-  const now = new Date().toISOString();
-
-  try {
-    // 1. Catálogo de metraje (incluye __DEFAULT__ como fallback sin magic number)
-    const { data: catalogData } = await db
-      .from("catalogo_metraje")
-      .select("codigo,metraje_por_pallet");
-    const catalogMap: Record<string, number> = {};
-    for (const c of catalogData ?? []) {
-      catalogMap[(c.codigo || "").toUpperCase().trim()] = Number(c.metraje_por_pallet);
-    }
-    const M2_DEFAULT = catalogMap["__DEFAULT__"] ?? 1.2;
-
-    // 2. Ubicaciones activas (R3 ya filtrado aquí; R1/R2/R4 los maneja la API)
-    const { data: availLocs } = await db
-      .from("localizadores")
-      .select("zona,localizador,capacidad,ocupado,disponible,formato,activo")
-      .eq("activo", true);
-
-    // 3. Mapear SubInvItem → StockItem y llamar al motor único /api/plan-ubicacion
-    const stockItems = items.map((item, idx) => ({
-      row_idx:               idx,
-      cod_org_inv:           item.cod_org_inv  || "",
-      codigo:                item.codigo       || "",
-      descripcion:           item.descripcion  || `${item.subinv} · ${item.formato || "Sin formato"}`,
-      subinventario_origen:  item.subinv,
-      localizador_origen:    item.loc,
-      lote:                  item.lote         || "",
-      cantidad_fisica:       item.cantidad_fisica || item.pallets,
-      pallets:               item.pallets,
-      cajas:                 0,
-      responsable:           "",
-      conteo:                null,
-      formato:               item.formato      || "",
-    }));
-
-    const resp = await fetch("/api/plan-ubicacion", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items: stockItems, locations: availLocs || [] }),
-    });
-    const { ok: planOk, plan, error: planErr } = await resp.json();
-    if (!planOk) throw new Error(planErr ?? "Error en /api/plan-ubicacion");
-
-    // 4. Construir registros para lineas_reubicacion
-    const records = (plan as PlanLine[]).map(line => {
-      const codKey = (line.codigo || "").toUpperCase().trim();
-      const m2Unit = catalogMap[codKey] || M2_DEFAULT;
-      const metraje = line.cantidad_fisica && line.cantidad_fisica > 0
-        ? Math.round(line.cantidad_fisica * 100) / 100
-        : Math.round(line.pallets * m2Unit * 100) / 100;
-
-      return {
-        cod_org_inv:           line.cod_org_inv  || null,
-        codigo:                line.codigo       || null,
-        descripcion:           line.descripcion,
-        subinventario_origen:  line.subinventario_origen,
-        localizador_origen:    line.localizador_origen,
-        lote:                  line.lote || null,
-        pallets:               line.pallets,
-        cajas:                 0,
-        cantidad_fisica:       line.cantidad_fisica || line.pallets,
-        metraje,
-        localizador_destino:   line.sin_espacio ? null : line.localizador_destino,
-        subinventario_destino: line.sin_espacio ? null : line.subinventario_destino,
-        estado:                "pendiente",
-        created_at:            now,
-        updated_at:            now,
-      };
-    });
-
-    // 5. Insertar en lotes
-    const BATCH = 50;
-    const batches: typeof records[] = [];
-    for (let i = 0; i < records.length; i += BATCH) batches.push(records.slice(i, i + BATCH));
-    const results = await Promise.all(batches.map(b => db.from("lineas_reubicacion").insert(b)));
-    let done = 0, errors = 0;
-    results.forEach((r, i) => { if (r.error) errors++; else done += batches[i].length; });
-
-    if (errors === 0) {
-      setProcesadoInfo({ count: done, subinv: selectedSubInv });
-      setImportLog(p => [...p, { msg: `✅ ${done} líneas enviadas a revisión — destinos asignados por /api/plan-ubicacion`, cls: "ok" }]);
-    } else {
-      setImportLog(p => [...p, { msg: `⚠ ${done} creadas, ${errors} lotes con error`, cls: "warn" }]);
-    }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    setImportLog(p => [...p, { msg: `❌ ${msg}`, cls: "err" }]);
-  } finally {
-    setProcesando(false);
-  }
-}
-// ── Consolidación ──────────────────────────────────────────────────────
-async function loadConsolidacion() {
-  setLoadingConsol(true);
-  try {
-    const resp = await fetch(`/api/analisis-bpt/consolidacion?umbral=${umbralConsol}`);
-    const { ok, movimientos, error: err } = await resp.json();
-    if (!ok) throw new Error(err);
-    setConsolidacion(movimientos);
-    setShowConsol(true);
-  } catch (e: unknown) {
-    setImportLog(p => [...p, { msg: `⚠ Consolidación: ${e instanceof Error ? e.message : String(e)}`, cls: "warn" }]);
-  } finally {
-    setLoadingConsol(false);
-  }
-}
 // ── Datos para render ──────────────────────────────────────────────────
-const consolFiltrado = !consolFilter
-  ? (consolidacion ?? [])
-  : (consolidacion ?? []).filter(m =>
-      m.codigo.includes(consolFilter) || m.lote.includes(consolFilter) ||
-      m.origen_localizador.includes(consolFilter) || m.destino_localizador.includes(consolFilter)
-    );
 const zonasRender = fZone === "all" ? Object.keys(allData) : [fZone].filter(z => allData[z]);
 const allLocsFlat = allLocs .filter(d => matchFilter(d.pct_ocupacion) && (fZone === "all" || d.zona === fZone) && (!fSearch || d.localizador.toUpperCase().includes(fSearch.toUpperCase())) ) .sort((a, b) => a.zona.localeCompare(b.zona) || a.localizador.localeCompare(b.localizador));
 const leyenda = selectedSubInv === "all" ? [ { c: C.empty, l: "Vacío" }, { c: C.low, l: "<50%" }, { c: C.mid, l: "50–80%" }, { c: C.high, l: "81–99%" }, { c: C.full, l: "100%" }, { c: C.over, l: ">110%" }, ] : [ { c: S.available, l: "Libre (disponible)" }, { c: S.hasSubInv, l: `Tiene ${selectedSubInv}` }, { c: S.otherOcup, l: "Ocupado por otros" }, { c: S.full, l: "Exceso" }, ];
@@ -773,10 +528,13 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
     style={{ margin: "14px 20px 0", border: `2px dashed ${dragging ? "#2563eb" : "#2e3247"}`, borderRadius: 10, padding: "13px 18px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", background: dragging ? "rgba(37,99,235,.06)" : "transparent", transition: "border-color .2s" }}
   >
     <div style={{ fontSize: 24 }}>📂</div>
-    <div style={{ flex: 1, minWidth: 180 }}>
-      <div style={{ fontSize: 13, fontWeight: 500 }}>Subir Excel de stock</div>
-      <div style={{ fontSize: 11, color: "#8b8fa8", marginTop: 2 }}>
-        Arrastra el archivo o haz clic para seleccionarlo
+    <div style={{ flex: 1, minWidth: 220 }}>
+      <div style={{ fontSize: 13, fontWeight: 500 }}>Subir Excel de stock o mapa de planta</div>
+      <div style={{ fontSize: 11, color: "#8b8fa8", marginTop: 3, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+        <span style={{ background: "#1e3a5f", color: "#60a5fa", padding: "1px 7px", borderRadius: 4 }}>Stock</span>
+        PALLETS (ceil) + CAJAS (cada saldo=1 pos) → ocupación real · SUBINVENTARIO → plan distribución
+        <span style={{ background: "#1a2e1a", color: "#4ade80", padding: "1px 7px", borderRadius: 4 }}>Mapa</span>
+        hoja CAL_LOC
       </div>
     </div>
     <button onClick={e => { e.stopPropagation(); fileRef.current?.click(); }}
@@ -849,7 +607,7 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
         </div>
 
         {selectedSubInv !== "all" && subInvStats && (
-          <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap" }}>
             <div style={{ background: "#0f1117", borderRadius: 7, padding: "8px 14px", fontSize: 12 }}>
               <span style={{ color: "#8b8fa8" }}>Loc con </span>
               <strong style={{ color: "#60a5fa" }}>{selectedSubInv}</strong>
@@ -871,36 +629,6 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
                 {allLocs.filter(d => (d.ocupado || 0) > 0 && !((subInvMap ?? {})[d.localizador.toUpperCase()])).length}
               </span>
             </div>
-
-            {/* ── BOTÓN PROCESAR ─────────────────────────────────────── */}
-            {storedItems.filter(i => i.subinv === selectedSubInv).length > 0 && (
-              <div style={{ marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-                {procesadoInfo?.subinv === selectedSubInv ? (
-                  <div style={{ background: "#0f2a0f", border: "1px solid #22c55e", borderRadius: 8, padding: "10px 16px", fontSize: 12, color: "#4ade80", textAlign: "center" as const }}>
-                    ✅ {procesadoInfo.count} líneas en revisión<br />
-                    <span style={{ fontSize: 10, color: "#86efac" }}>→ ir a Órdenes para aprobar</span>
-                  </div>
-                ) : (
-                  <button
-                    onClick={procesarComoLineas}
-                    disabled={procesando}
-                    style={{
-                      background: procesando ? "#374151" : "#16a34a",
-                      border: "none", color: "#fff",
-                      fontSize: 13, fontWeight: 700, letterSpacing: 1,
-                      padding: "12px 24px", borderRadius: 8, cursor: procesando ? "wait" : "pointer",
-                      opacity: procesando ? 0.7 : 1,
-                      boxShadow: "0 2px 8px rgba(22,163,74,0.4)",
-                    }}
-                  >
-                    {procesando ? "⟳ Procesando…" : `▶ ENVIAR ${storedItems.filter(i => i.subinv === selectedSubInv).length} LÍNEAS A REVISIÓN`}
-                  </button>
-                )}
-                <span style={{ fontSize: 10, color: "#5a5e75", textAlign: "right" as const }}>
-                  Crea las líneas como pendientes para revisión del supervisor
-                </span>
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -1009,86 +737,112 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
       </div>
     )}
 
-    {/* ── PANEL CONSOLIDACIÓN ─────────────────────────────────────── */}
-    <div style={{ background: "#0d1a0d", border: "1px solid #166534", borderRadius: 10, marginBottom: 12, overflow: "hidden" }}>
-      <div style={{ background: "#1a2e1a", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 16 }}>🔀</span>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#86efac" }}>Consolidación de Stock</div>
-            <div style={{ fontSize: 11, color: "#4ade80", marginTop: 1 }}>Lotes dispersos con saldo bajo → mover al localizador principal</div>
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <label style={{ fontSize: 11, color: "#86efac" }}>Umbral:</label>
-          <input type="number" min={1} max={20} value={umbralConsol}
-            onChange={e => setUmbralConsol(Number(e.target.value))}
-            style={{ width: 52, fontSize: 12, padding: "4px 6px", border: "1px solid #166534", borderRadius: 5, background: "#0f1117", color: "#e8eaf0", outline: "none" }} />
-          <span style={{ fontSize: 11, color: "#4ade80" }}>pallets</span>
-          <button onClick={loadConsolidacion} disabled={loadingConsol}
-            style={{ padding: "5px 14px", fontSize: 12, border: "none", borderRadius: 6, background: loadingConsol ? "#374151" : "#16a34a", color: "#fff", cursor: loadingConsol ? "wait" : "pointer", fontWeight: 600 }}>
-            {loadingConsol ? "⟳ Calculando…" : "Calcular"}
-          </button>
-          {consolidacion !== null && (
-            <button onClick={() => setShowConsol(v => !v)}
-              style={{ padding: "5px 12px", fontSize: 12, border: "1px solid #166534", borderRadius: 6, background: showConsol ? "#166534" : "transparent", color: "#86efac", cursor: "pointer" }}>
-              {showConsol ? "Ocultar" : `Ver ${consolidacion.length} movimientos`}
-            </button>
-          )}
-        </div>
-      </div>
+    {/* ── ANÁLISIS COMPLETO DE BODEGA ────────────────────────────────── */}
+    {analisisData && (
+      <div style={{ marginBottom: 12 }}>
 
-      {consolidacion !== null && !loadingConsol && (
-        <div style={{ padding: "10px 16px" }}>
-          {/* Stats */}
-          <div style={{ display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
-            {[
-              { v: consolidacion.length,                                                            l: "Movimientos" },
-              { v: new Set(consolidacion.map(m => `${m.codigo}|||${m.lote}`)).size,                l: "Lotes únicos" },
-              { v: consolidacion.reduce((s, m) => s + m.origen_pallets, 0),                        l: "Pallets a mover" },
-            ].map(s => (
-              <div key={s.l} style={{ background: "#0f1117", borderRadius: 7, padding: "8px 14px" }}>
-                <div style={{ fontSize: 20, fontWeight: 700, color: "#4ade80" }}>{s.v}</div>
-                <div style={{ fontSize: 10, color: "#8b8fa8" }}>{s.l}</div>
-              </div>
-            ))}
-            <input value={consolFilter} onChange={e => setConsolFilter(e.target.value.toUpperCase())}
-              placeholder="Filtrar código / lote / loc…"
-              style={{ fontSize: 11, padding: "5px 10px", border: "1px solid #166534", borderRadius: 6, background: "#0f1117", color: "#e8eaf0", outline: "none", marginLeft: "auto", width: 210 }} />
-          </div>
-
-          {showConsol && (
-            <div style={{ maxHeight: 420, overflowY: "auto", border: "1px solid #1a3a1a", borderRadius: 8, overflow: "hidden" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-                <thead>
-                  <tr style={{ background: "#1a2e1a", position: "sticky", top: 0 }}>
-                    {["Código","Lote","Origen","Plt","→","Destino","Plt destino"].map(h => (
-                      <th key={h} style={{ padding: "7px 10px", textAlign: "left", color: "#86efac", fontWeight: 600, whiteSpace: "nowrap", borderBottom: "1px solid #166534" }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {consolFiltrado.map((m, i) => (
-                    <tr key={i} style={{ borderBottom: "1px solid #1a2e1a", background: i % 2 === 0 ? "transparent" : "#111a11" }}>
-                      <td style={{ padding: "5px 10px", fontWeight: 600, color: "#e8eaf0" }}>{m.codigo}</td>
-                      <td style={{ padding: "5px 10px", color: "#93c5fd" }}>{m.lote}</td>
-                      <td style={{ padding: "5px 10px", color: "#f87171", fontFamily: "monospace" }}>{m.origen_localizador}</td>
-                      <td style={{ padding: "5px 10px", color: "#f87171", fontWeight: 700 }}>{m.origen_pallets}</td>
-                      <td style={{ padding: "5px 10px", color: "#5a5e75", textAlign: "center" }}>→</td>
-                      <td style={{ padding: "5px 10px", color: "#4ade80", fontFamily: "monospace" }}>{m.destino_localizador}</td>
-                      <td style={{ padding: "5px 10px", color: "#4ade80", fontWeight: 700 }}>{m.destino_pallets}</td>
-                    </tr>
-                  ))}
-                  {consolFiltrado.length === 0 && (
-                    <tr><td colSpan={7} style={{ padding: 24, textAlign: "center", color: "#5a5e75" }}>Sin resultados para el filtro</td></tr>
-                  )}
-                </tbody>
-              </table>
+        {/* Alertas */}
+        {analisisData.alertas.length > 0 && (
+          <div style={{ background: "#1a1117", border: "1px solid #7f1d1d", borderRadius: 10, marginBottom: 8, overflow: "hidden" }}>
+            <div style={{ background: "#2e1a1a", padding: "8px 14px", fontSize: 12, fontWeight: 700, color: "#fca5a5", display: "flex", alignItems: "center", gap: 8 }}>
+              <span>⚠ Alertas de bodega</span>
+              <span style={{ background: "#7f1d1d", color: "#fca5a5", padding: "1px 8px", borderRadius: 10, fontSize: 10 }}>{analisisData.alertas.length}</span>
             </div>
-          )}
-        </div>
-      )}
-    </div>
+            <div style={{ padding: "8px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
+              {analisisData.alertas.map((a, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 11 }}>
+                  <span style={{ color: a.nivel === "critico" ? "#f87171" : "#fbbf24", fontWeight: 700, flexShrink: 0 }}>
+                    {a.nivel === "critico" ? "●" : "◦"}
+                  </span>
+                  <div>
+                    <span style={{ color: a.nivel === "critico" ? "#fca5a5" : "#fde68a" }}>{a.mensaje}</span>
+                    {a.detalle && <span style={{ color: "#5a5e75", marginLeft: 6 }}>— {a.detalle}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <button onClick={() => setShowAnalisis(!showAnalisis)}
+          style={{ fontSize: 11, padding: "5px 14px", background: showAnalisis ? "#1e3a5f" : "#222535", border: "1px solid #2563eb", borderRadius: 6, color: "#60a5fa", cursor: "pointer", marginBottom: 8 }}>
+          {showAnalisis ? "▲ Ocultar análisis detallado" : "▼ Ver análisis completo (fragmentación · consolidación · formatos)"}
+        </button>
+
+        {showAnalisis && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+
+            {/* Fragmentación */}
+            {analisisData.fragmentacion.length > 0 && (
+              <div style={{ background: "#0d1117", border: "1px solid #2e3247", borderRadius: 9, padding: "12px 14px" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#93c5fd", marginBottom: 10 }}>
+                  Fragmentación por formato
+                  <span style={{ fontSize: 10, color: "#5a5e75", fontWeight: 400, marginLeft: 6 }}>cuántos localizadores ocupa cada formato</span>
+                </div>
+                {analisisData.fragmentacion.map((f, i) => {
+                  const col = f.nivel === "critico" ? "#f87171" : f.nivel === "fragmentado" ? "#fbbf24" : f.nivel === "aceptable" ? "#60a5fa" : "#4ade80";
+                  return (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: "1px solid #1e2235", fontSize: 11 }}>
+                      <span style={{ color: "#e8eaf0", maxWidth: "55%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.formato}</span>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span style={{ color: "#8b8fa8" }}>{f.total_pallets} plt</span>
+                        <span style={{ color: col, fontWeight: 700 }}>{f.num_localizadores} locs</span>
+                        <span style={{ background: col + "33", color: col, padding: "1px 6px", borderRadius: 3, fontSize: 10 }}>{f.nivel}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Resumen por formato */}
+            {analisisData.resumen_formatos.length > 0 && (
+              <div style={{ background: "#0d1117", border: "1px solid #2e3247", borderRadius: 9, padding: "12px 14px" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#93c5fd", marginBottom: 10 }}>
+                  Cobertura por formato
+                  <span style={{ fontSize: 10, color: "#5a5e75", fontWeight: 400, marginLeft: 6 }}>% pallets en locs del mismo formato</span>
+                </div>
+                {analisisData.resumen_formatos.map((r, i) => (
+                  <div key={i} style={{ padding: "5px 0", borderBottom: "1px solid #1e2235", fontSize: 11 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                      <span style={{ color: "#e8eaf0", maxWidth: "55%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.formato}</span>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <span style={{ color: "#8b8fa8" }}>{r.total_pallets} plt</span>
+                        {r.m2_estimado && <span style={{ color: "#5a5e75" }}>{r.m2_estimado}m²</span>}
+                        <span style={{ color: r.cobertura_pct >= 80 ? "#4ade80" : r.cobertura_pct >= 50 ? "#fbbf24" : "#f87171", fontWeight: 700 }}>{r.cobertura_pct}%</span>
+                      </div>
+                    </div>
+                    <div style={{ height: 3, background: "#1e2235", borderRadius: 2 }}>
+                      <div style={{ height: "100%", width: `${Math.min(100, r.cobertura_pct)}%`, background: r.cobertura_pct >= 80 ? "#4ade80" : r.cobertura_pct >= 50 ? "#fbbf24" : "#f87171", borderRadius: 2 }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Sugerencias de consolidación */}
+            {analisisData.consolidaciones.length > 0 && (
+              <div style={{ background: "#0d1117", border: "1px solid #2e3247", borderRadius: 9, padding: "12px 14px", gridColumn: "1 / -1" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#a78bfa", marginBottom: 10 }}>
+                  Sugerencias de consolidación
+                  <span style={{ fontSize: 10, color: "#5a5e75", fontWeight: 400, marginLeft: 6 }}>mueve estos lotes para reducir fragmentación</span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 8 }}>
+                  {analisisData.consolidaciones.map((c, i) => (
+                    <div key={i} style={{ background: "#0f1117", border: "1px solid #3730a3", borderRadius: 7, padding: "9px 12px", fontSize: 11 }}>
+                      <div style={{ color: "#a78bfa", fontWeight: 700, marginBottom: 4 }}>{c.formato}</div>
+                      <div style={{ color: "#8b8fa8", marginBottom: 2 }}>Lote: <span style={{ color: "#e8eaf0" }}>{c.lote}</span></div>
+                      <div style={{ color: "#8b8fa8", marginBottom: 2 }}>{c.pallets_a_mover} pallets desde {c.locs_origen.length} locs → <span style={{ color: "#4ade80", fontWeight: 600 }}>{c.loc_destino}</span></div>
+                      <div style={{ color: "#60a5fa", fontSize: 10, marginTop: 4 }}>{c.beneficio}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )}
 
     {/* Toolbar */}
     <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
@@ -1133,7 +887,7 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
     </div>
 
     {/* Contenido + panel lateral */}
-    <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }} className="analisis-content-row">
+    <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
 
       <div style={{ flex: 1, minWidth: 0 }}>
         {loading ? (
@@ -1293,7 +1047,7 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
         const label = p > 1.1 ? "EXCESO" : p >= 1.0 ? "LLENO" : p >= 0.8 ? "ALTO" : p > 0 ? "EN USO" : "VACÍO";
         const subQty= subInvMap ? (subInvMap[d.localizador.toUpperCase()] ?? 0) : null;
         return (
-          <div className="analisis-side-panel" style={{ width: 235, flexShrink: 0, background: "#1a1d27", border: "1px solid #4a5175", borderRadius: 10, padding: "15px", position: "sticky", top: 80 }}>
+          <div style={{ width: 235, flexShrink: 0, background: "#1a1d27", border: "1px solid #4a5175", borderRadius: 10, padding: "15px", position: "sticky", top: 80 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
               <div>
                 <div style={{ fontSize: 18, fontWeight: 700 }}>{d.localizador}</div>

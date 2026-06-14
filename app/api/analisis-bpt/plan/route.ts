@@ -6,6 +6,7 @@ interface SubInvItem {
   formato: string;
   lote: string;
   pallets: number;
+  codigo?: string;
 }
 
 interface LocInput {
@@ -20,6 +21,7 @@ interface Asignacion {
   loc: string;
   zona: string;
   palletsAsignados: number;
+  prioridad?: string;
 }
 
 interface PlanEntry {
@@ -29,7 +31,12 @@ interface PlanEntry {
   asignaciones: Asignacion[];
   palletsAsignados: number;
   palletsRestantes: number;
+  cobertura_pct?: number;
 }
+
+// ── Algoritmo TS (fallback si el backend Python no está disponible) ──────────
+
+const FORMATOS_LIBRES = new Set(["", "MEZCLA", "SIN FORMATO", "MIXTO", "LIBRE", "GENERAL"]);
 
 function computePlan(items: SubInvItem[], locs: LocInput[]): PlanEntry[] {
   const groups = new Map<string, { formato: string; lote: string; pallets: number }>();
@@ -63,32 +70,44 @@ function computePlan(items: SubInvItem[], locs: LocInput[]): PlanEntry[] {
       asignaciones: [],
       palletsAsignados: 0,
       palletsRestantes: g.pallets,
+      cobertura_pct: 0,
     };
 
     let remaining = g.pallets;
+    let enFormato = 0;
+    const assigned = new Set<string>();
 
+    const take = (loc: typeof pool[0], prioridad: string) => {
+      if (remaining <= 0 || loc.freeSlots <= 0) return;
+      const t = Math.min(loc.freeSlots, remaining);
+      entry.asignaciones.push({ loc: loc.loc, zona: loc.zona, palletsAsignados: t, prioridad });
+      loc.freeSlots -= t;
+      remaining -= t;
+      assigned.add(loc.loc);
+      if (prioridad === "formato_exacto") enFormato += t;
+    };
+
+    // P1: formato exacto
     for (const loc of pool) {
       if (remaining <= 0) break;
-      if (loc.freeSlots <= 0) continue;
-      if (loc.formatoLoc !== g.formato) continue;
-      const take = Math.min(loc.freeSlots, remaining);
-      entry.asignaciones.push({ loc: loc.loc, zona: loc.zona, palletsAsignados: take });
-      loc.freeSlots -= take;
-      remaining -= take;
+      if (!assigned.has(loc.loc) && loc.formatoLoc === g.formato) take(loc, "formato_exacto");
     }
-
+    // P2: formato libre / mezcla
     for (const loc of pool) {
       if (remaining <= 0) break;
-      if (loc.freeSlots <= 0) continue;
-      if (entry.asignaciones.find((a) => a.loc === loc.loc)) continue;
-      const take = Math.min(loc.freeSlots, remaining);
-      entry.asignaciones.push({ loc: loc.loc, zona: loc.zona, palletsAsignados: take });
-      loc.freeSlots -= take;
-      remaining -= take;
+      if (!assigned.has(loc.loc) && FORMATOS_LIBRES.has(loc.formatoLoc)) take(loc, "formato_libre");
+    }
+    // P3: cualquiera
+    for (const loc of pool) {
+      if (remaining <= 0) break;
+      if (!assigned.has(loc.loc)) take(loc, "cualquiera");
     }
 
     entry.palletsAsignados = g.pallets - remaining;
     entry.palletsRestantes = remaining;
+    entry.cobertura_pct = entry.palletsAsignados > 0
+      ? Math.round((enFormato / entry.palletsAsignados) * 1000) / 10
+      : 0;
     entries.push(entry);
   }
 
@@ -97,10 +116,18 @@ function computePlan(items: SubInvItem[], locs: LocInput[]): PlanEntry[] {
   );
 }
 
+// ── Handler ──────────────────────────────────────────────────────────────────
+
+const BACKEND = process.env.BACKEND_URL ?? "http://localhost:8000";
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { items, locations } = body as { items: unknown; locations: unknown };
+    const { items, locations, fullAnalysis } = body as {
+      items: unknown;
+      locations: unknown;
+      fullAnalysis?: boolean;
+    };
 
     if (!Array.isArray(items) || !Array.isArray(locations)) {
       return NextResponse.json(
@@ -109,16 +136,30 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const plan = computePlan(items as SubInvItem[], locations as LocInput[]);
-
-    return NextResponse.json(
-      { ok: true, plan },
-      {
-        headers: {
-          // Plan results are deterministic for the same input; cache for 30s on CDN
-          "Cache-Control": "private, max-age=30",
-        },
+    // Intentar usar el backend Python para el algoritmo mejorado
+    const endpoint = fullAnalysis ? "/analisis-bpt/analisis-completo" : "/analisis-bpt/plan";
+    try {
+      const pyResp = await fetch(`${BACKEND}${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items, locations }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (pyResp.ok) {
+        const data = await pyResp.json();
+        return NextResponse.json(data, {
+          headers: { "Cache-Control": "private, max-age=30", "X-Source": "python" },
+        });
       }
+    } catch {
+      // Backend Python no disponible — usar algoritmo TS de respaldo
+    }
+
+    // Fallback: algoritmo TypeScript
+    const plan = computePlan(items as SubInvItem[], locations as LocInput[]);
+    return NextResponse.json(
+      { ok: true, plan, _source: "typescript-fallback" },
+      { headers: { "Cache-Control": "private, max-age=30", "X-Source": "typescript" } }
     );
   } catch (e) {
     return NextResponse.json({ ok: false, error: String(e) }, { status: 500 });

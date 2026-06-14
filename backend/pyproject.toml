@@ -1,0 +1,19 @@
+[project]
+name = "logistica-bpt-backend"
+version = "0.1.0"
+description = "Backend FastAPI para el sistema de logística BPT"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "supabase>=2.9.0",
+    "openpyxl>=3.1.0",
+    "python-multipart>=0.0.9",
+    "python-jose[cryptography]>=3.3.0",
+    "pydantic[email]>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+serve = "uvicorn main:app --reload --host 0.0.0.0 --port 8000"

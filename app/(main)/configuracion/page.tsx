@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
-import { getBrowserClient } from "@/lib/supabase/browser";
+import { useState, useEffect, useRef, useCallback } from "react";
 import * as XLSX from "xlsx";
+import { getBrowserClient } from "@/lib/supabase/browser";
 
 const db = getBrowserClient();
 
-interface Localizador {
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface Loc {
   zona: string;
   localizador: string;
   formato: string;
@@ -17,941 +19,1277 @@ interface Localizador {
   activo: boolean;
 }
 
-type SortKey = keyof Localizador;
-type EditField = "capacidad" | "formato" | "activo";
-
-interface EditState {
-  localizador: string;
-  zona: string;
-  field: EditField;
-  value: string | number | boolean;
+interface LocRow extends Loc {
+  _key: string;
+  _dirty: boolean;
+  _new: boolean;
 }
 
+interface Linea {
+  id: string;
+  numero_orden: string | null;
+  cod_org_inv: string | null;
+  codigo: string | null;
+  descripcion: string;
+  subinventario_origen: string | null;
+  localizador_origen: string | null;
+  lote: string | null;
+  cantidad_fisica: number;
+  pallets: number;
+  cajas: number;
+  subinventario_destino: string | null;
+  localizador_destino: string | null;
+  responsable: string | null;
+  inv_pe: number | null;
+  notas: string | null;
+  estado: string;
+  created_at: string;
+}
+
+interface LineaRow extends Linea {
+  _dirty: boolean;
+  _new: boolean;
+}
+
+interface CatalogRow {
+  codigo: string;
+  descripcion: string;
+  formato: string | null;
+  cajas_por_piso: number | null;
+  cajas_por_pallet: number | null;
+  unidad_de_medida: string | null;
+  m2_por_caja: number | null;
+  m2_x_pe: number | null;
+  _dirty: boolean;
+  _new: boolean;           // existe solo en lineas, aún no en catalogo_productos
+  _fmtSugerido: string;   // formato extraído de la descripción
+  _emptyFields: string[];  // lista de campos críticos vacíos
+}
+
+type TabId = "loc" | "lineas" | "catalogo";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const N = (v: unknown) => Number(v) || 0;
+const S = (v: unknown) => String(v ?? "");
+
+function calcDisp(cap: number, occ: number) {
+  return Math.max(0, cap - occ);
+}
+function calcPct(occ: number, cap: number) {
+  return cap > 0 ? Math.min(9.9999, Math.round((occ / cap) * 10000) / 10000) : 0;
+}
+
+const CAL_LOC_HEADER_ROW = 7;
+const CAL_LOC_COL = { ZONA: 1, LOC: 2, FORMATO: 3, CAPACIDAD: 10, OCUPADO: 14, DISPONIBLE: 17, PCT: 18 };
+
+function parseCalLoc(wb: XLSX.WorkBook): Loc[] {
+  const ws = wb.Sheets["CAL_LOC"];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][];
+  const out: Loc[] = [];
+  for (let i = CAL_LOC_HEADER_ROW + 1; i < rows.length; i++) {
+    const r = rows[i] as unknown[];
+    const zona = String(r[CAL_LOC_COL.ZONA] || "").trim();
+    const loc  = String(r[CAL_LOC_COL.LOC]  || "").trim();
+    if (!zona.startsWith("ZONA") || !loc) continue;
+    const cap  = parseInt(String(r[CAL_LOC_COL.CAPACIDAD]))  || 0;
+    const ocup = parseInt(String(r[CAL_LOC_COL.OCUPADO]))    || 0;
+    const disp = parseInt(String(r[CAL_LOC_COL.DISPONIBLE])) || (cap - ocup);
+    let pct    = parseFloat(String(r[CAL_LOC_COL.PCT]))      || 0;
+    if (pct > 5) pct /= 100;
+    out.push({
+      zona, localizador: loc,
+      formato:      String(r[CAL_LOC_COL.FORMATO] || "Mezcla").trim(),
+      capacidad: cap, ocupado: ocup, disponible: disp,
+      pct_ocupacion: Math.round(pct * 10000) / 10000,
+      activo: true,
+    });
+  }
+  return out;
+}
+
+const FMT_RE = /\b(\d{1,3}(?:[.,]\d+)?[Xx×]\d{1,3}(?:[.,]\d+)?)\b/;
+function extractFormato(desc: string): string {
+  const m = FMT_RE.exec(desc);
+  return m ? m[1].toUpperCase().replace(/[xX×]/g, "X") : "";
+}
+function getCriticalEmpty(r: Pick<CatalogRow, "formato" | "cajas_por_pallet" | "m2_x_pe" | "cajas_por_piso">): string[] {
+  const empty: string[] = [];
+  if (!r.formato) empty.push("formato");
+  if (!r.cajas_por_pallet) empty.push("cajas_x_pallet");
+  if (!r.m2_x_pe) empty.push("m2_x_pe");
+  if (!r.cajas_por_piso) empty.push("cajas_x_piso");
+  return empty;
+}
+
+function getEstadoStyle(estado: string): React.CSSProperties {
+  const map: Record<string, React.CSSProperties> = {
+    pendiente:   { background: "#1e3a5f", color: "#60a5fa" },
+    aprobada:    { background: "#1a2e1a", color: "#4ade80" },
+    rechazada:   { background: "#450a0a", color: "#f87171" },
+    en_proceso:  { background: "#2d1a00", color: "#fbbf24" },
+    completada:  { background: "#1a2520", color: "#34d399" },
+  };
+  return map[estado] ?? { background: "#1e2235", color: "#6b7280" };
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
+
 export default function ConfiguracionPage() {
-  const [rows, setRows] = useState<Localizador[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [flash, setFlash] = useState<{ msg: string; ok: boolean } | null>(null);
-  const [search, setSearch] = useState("");
-  const [filterZona, setFilterZona] = useState("all");
-  const [filterActivo, setFilterActivo] = useState<"all" | "activo" | "bloqueado">("all");
-  const [sortBy, setSortBy] = useState<SortKey>("zona");
-  const [sortAsc, setSortAsc] = useState(true);
-  const [edit, setEdit] = useState<EditState | null>(null);
-  const [bulkZona, setBulkZona] = useState("");
-  const [bulkActivo, setBulkActivo] = useState<boolean | null>(null);
-  const [bulkCapacidad, setBulkCapacidad] = useState("");
-  const [showBulk, setShowBulk] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [tab, setTab] = useState<TabId>("loc");
 
-  // Nueva zona / localizadores
-  const [showNuevaZona, setShowNuevaZona] = useState(false);
-  const [nzZona, setNzZona]             = useState("");
-  const [nzDesde, setNzDesde]           = useState(1);
-  const [nzHasta, setNzHasta]           = useState(10);
-  const [nzFilas, setNzFilas]           = useState(1);
-  const [nzCols, setNzCols]             = useState(1);
-  const [nzCapacidad, setNzCapacidad]   = useState(20);
-  const [nzFormato, setNzFormato]       = useState("Mezcla");
-  const [nzPreview, setNzPreview]       = useState<string[]>([]);
-  const [savingZona, setSavingZona]     = useState(false);
+  // Localizadores
+  const [zones, setZones]             = useState<string[]>([]);
+  const [zoneFilter, setZoneFilter]   = useState("ALL");
+  const [locs, setLocs]               = useState<LocRow[]>([]);
+  const [loadingLoc, setLoadingLoc]   = useState(false);
+  const [savingLoc, setSavingLoc]     = useState(false);
 
-  // Catálogo de metraje
-  const [catalogCount,    setCatalogCount]    = useState<number | null>(null);
-  const [catalogLoading,  setCatalogLoading]  = useState(false);
-  const [catalogDragging, setCatalogDragging] = useState(false);
-  const catalogRef = useRef<HTMLInputElement>(null);
+  // Range update – Locs
+  const [showRangeLoc, setShowRangeLoc]         = useState(false);
+  const [rangeFromLoc, setRangeFromLoc]         = useState("1");
+  const [rangeToLoc, setRangeToLoc]             = useState("10");
+  const [rangeFieldLoc, setRangeFieldLoc]       = useState("formato");
+  const [rangeValueLoc, setRangeValueLoc]       = useState("");
 
-  // Operadores
-  interface Operador { id: string; nombre: string; email?: string; rol?: string; bodega_cedi?: string; activo: boolean; }
-  const [operadores,    setOperadores]    = useState<Operador[]>([]);
-  const [opLoading,     setOpLoading]     = useState(false);
-  const [opImporting,   setOpImporting]   = useState(false);
-  const [showOpForm,    setShowOpForm]    = useState(false);
-  const [newOp, setNewOp] = useState({ nombre: "", rol: "OPERADOR", email: "" });
-  const opFileRef = useRef<HTMLInputElement>(null);
+  // File diff – Locs
+  const [showDiff, setShowDiff]         = useState(false);
+  const [diffLoading, setDiffLoading]   = useState(false);
+  const [applyingDiff, setApplyingDiff] = useState(false);
+  const [diffData, setDiffData]         = useState<{
+    changed: Loc[]; newRows: Loc[]; unchanged: number;
+  } | null>(null);
+  const fileRefLoc = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    const { data, error } = await db
-      .from("localizadores")
-      .select("zona,localizador,formato,capacidad,ocupado,disponible,pct_ocupacion,activo")
-      .order("zona")
-      .order("localizador");
-    if (!error && data) setRows(data as Localizador[]);
-    setLoading(false);
+  // Lineas
+  const [lineas, setLineas]                 = useState<LineaRow[]>([]);
+  const [loadingLineas, setLoadingLineas]   = useState(false);
+  const [savingLineas, setSavingLineas]     = useState(false);
+  const [estadoFilter, setEstadoFilter]     = useState("ALL");
+  const [uploadingLineas, setUploadingLineas] = useState(false);
+
+  // Range update – Lineas
+  const [showRangeLineas, setShowRangeLineas]     = useState(false);
+  const [rangeFromLineas, setRangeFromLineas]     = useState("1");
+  const [rangeToLineas, setRangeToLineas]         = useState("10");
+  const [rangeFieldLineas, setRangeFieldLineas]   = useState("responsable");
+  const [rangeValueLineas, setRangeValueLineas]   = useState("");
+
+  const fileRefLineas = useRef<HTMLInputElement>(null);
+
+  // Catálogo
+  const [catalog, setCatalog]               = useState<CatalogRow[]>([]);
+  const [loadingCatalog, setLoadingCatalog] = useState(false);
+  const [savingCatalog, setSavingCatalog]   = useState(false);
+  const [catFilter, setCatFilter]           = useState<"all" | "empty">("all");
+
+  // Toast
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const showToast = useCallback((msg: string, ok = true) => {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 3500);
   }, []);
 
-  useEffect(() => { load(); fetchCatalogCount(); loadOperadores(); }, [load]);
-
-  async function fetchCatalogCount() {
-    const { count } = await db
-      .from("catalogo_metraje")
-      .select("codigo", { count: "exact", head: true });
-    setCatalogCount(count ?? 0);
-  }
-
-  async function loadOperadores() {
-    setOpLoading(true);
-    const { data } = await db.from("usuarios_bodega")
-      .select("id,nombre,email,rol,bodega_cedi,activo").order("nombre");
-    if (data) setOperadores(data as Operador[]);
-    setOpLoading(false);
-  }
-
-  async function agregarOperador() {
-    if (!newOp.nombre.trim()) { showFlash("⚠ El nombre es obligatorio", false); return; }
-    const { error } = await db.from("usuarios_bodega").insert({
-      nombre: newOp.nombre.trim().toUpperCase(),
-      rol:    newOp.rol || "OPERADOR",
-      email:  newOp.email.trim() || null,
-      activo: true,
+  // ── Load zones ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    db.from("localizadores").select("zona").order("zona").then(({ data }) => {
+      if (data) {
+        const unique = [...new Set((data as { zona: string }[]).map(r => r.zona))];
+        setZones(unique);
+      }
     });
-    if (error) { showFlash(`❌ ${error.message}`, false); return; }
-    showFlash(`✓ ${newOp.nombre} registrado`);
-    setNewOp({ nombre: "", rol: "OPERADOR", email: "" });
-    setShowOpForm(false);
-    loadOperadores();
-  }
+  }, []);
 
-  async function toggleOperador(op: Operador) {
-    const { error } = await db.from("usuarios_bodega").update({ activo: !op.activo }).eq("id", op.id);
-    if (!error) setOperadores(p => p.map(o => o.id === op.id ? { ...o, activo: !o.activo } : o));
-    else showFlash(`❌ ${error.message}`, false);
-  }
-
-  async function importarOperadores(file: File) {
-    setOpImporting(true);
-    try {
-      const buf  = await file.arrayBuffer();
-      const wb   = XLSX.read(buf, { type: "array" });
-      const ws   = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][];
-
-      const norm = (v: unknown) =>
-        String(v).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
-
-      let hi = -1, niIdx = -1, eiIdx = -1, rolIdx = -1;
-      for (let i = 0; i < Math.min(10, rows.length); i++) {
-        const row = (rows[i] as unknown[]).map(norm);
-        const ni = row.findIndex(c => c === "NOMBRE" || c === "OPERADOR" || c.startsWith("NOMB"));
-        if (ni >= 0) {
-          hi = i; niIdx = ni;
-          eiIdx  = row.findIndex((c, idx) => idx !== ni && (c === "EMAIL" || c === "CORREO" || c.startsWith("MAIL")));
-          rolIdx = row.findIndex((c, idx) => idx !== ni && (c === "ROL" || c === "CARGO" || c === "TIPO" || c.startsWith("ROL")));
-          break;
-        }
-      }
-      if (hi < 0 || niIdx < 0) {
-        showFlash("⚠ No se encontró columna NOMBRE en el archivo", false);
-        setOpImporting(false);
-        return;
-      }
-
-      const records: { nombre: string; email?: string; rol?: string; activo: boolean }[] = [];
-      for (let i = hi + 1; i < rows.length; i++) {
-        const r = rows[i] as unknown[];
-        const nombre = String(r[niIdx] || "").trim().toUpperCase();
-        if (!nombre) continue;
-        records.push({
-          nombre,
-          email:  eiIdx  >= 0 ? String(r[eiIdx]  || "").trim() || undefined : undefined,
-          rol:    rolIdx >= 0 ? String(r[rolIdx] || "").trim().toUpperCase() || "OPERADOR" : "OPERADOR",
-          activo: true,
-        });
-      }
-      if (!records.length) { showFlash("⚠ No se encontraron filas válidas", false); setOpImporting(false); return; }
-
-      const BATCH = 200;
-      let done = 0, errors = 0;
-      for (let i = 0; i < records.length; i += BATCH) {
-        const { error } = await db.from("usuarios_bodega")
-          .insert(records.slice(i, i + BATCH));
-        if (error) errors++;
-        else done += Math.min(BATCH, records.length - i);
-      }
-      setOpImporting(false);
-      if (!errors) { showFlash(`✓ ${done} operadores importados`); loadOperadores(); }
-      else showFlash(`⚠ ${done} importados, ${errors} lotes con error`, false);
-    } catch (e) {
-      setOpImporting(false);
-      showFlash(`❌ ${e instanceof Error ? e.message : String(e)}`, false);
+  // ── Load localizadores ──────────────────────────────────────────────────────
+  const loadLocs = useCallback(async () => {
+    setLoadingLoc(true);
+    let q = db.from("localizadores")
+      .select("zona,localizador,formato,capacidad,ocupado,disponible,pct_ocupacion,activo")
+      .order("zona").order("localizador");
+    if (zoneFilter !== "ALL") q = q.eq("zona", zoneFilter);
+    const { data, error } = await (q as ReturnType<typeof q.limit>).limit(1000);
+    if (error) showToast("Error al cargar localizadores: " + error.message, false);
+    else {
+      setLocs((data as Loc[]).map(r => ({
+        ...r,
+        _key: `${r.zona}|${r.localizador}`,
+        _dirty: false,
+        _new: false,
+      })));
     }
-  }
+    setLoadingLoc(false);
+  }, [zoneFilter, showToast]);
 
-  async function uploadCatalog(file: File) {
-    setCatalogLoading(true);
-    showFlash("Leyendo catálogo…");
-    try {
-      const buf  = await file.arrayBuffer();
-      const wb   = XLSX.read(buf, { type: "array" });
-      const ws   = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][];
+  useEffect(() => { loadLocs(); }, [loadLocs]);
 
-      // Auto-detectar columnas
-      const norm = (v: unknown) =>
-        String(v).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z0-9 ]/g, "");
-
-      let headerIdx = -1, codIdx = -1, metIdx = -1, descIdx = -1;
-      let cajasPalletIdx = -1, m2CjIdx = -1, m2PeIdx = -1, formatoIdx = -1;
-      let lineaNegocioIdx = -1;
-      for (let i = 0; i < Math.min(20, rows.length); i++) {
-        const row = (rows[i] as unknown[]).map(norm);
-        const ci = row.findIndex(c =>
-          c === "CODIGO" || c === "COD" || c === "CODART" || c === "ITEM" ||
-          c === "SKU" || c.startsWith("COD") || c === "ARTICULO"
-        );
-        if (ci < 0) continue;
-        headerIdx = i; codIdx = ci;
-        descIdx         = row.findIndex((c, idx) => idx !== ci && (c.startsWith("DESC") || c.includes("NOMBRE") || c === "PRODUCTO"));
-        lineaNegocioIdx = row.findIndex((c, idx) => idx !== ci && (c.includes("LINEA") || c.includes("NEGOCIO")));
-        cajasPalletIdx  = row.findIndex((c, idx) => idx !== ci && (c === "CAJAS POR PALET" || c === "CAJAS POR PALLET" || c.startsWith("CAJA")));
-        // m2 por caja: detectar antes que metIdx para que quede excluido del set
-        m2CjIdx  = row.findIndex((c, idx) => idx !== ci && (
-          c === "M2 X CJ" || c === "M2XCJ" || c === "M2 CJ" ||
-          (c.includes("METRO") && c.includes("CAJA")) ||
-          (c.includes("M2") && c.includes("CAJA"))
-        ));
-        m2PeIdx  = row.findIndex((c, idx) => idx !== ci && (c === "M2 X PE" || c === "M2XPE" || c === "M2 PE"));
-        formatoIdx = row.findIndex((c, idx) => idx !== ci && c === "FORMATO");
-        // metraje por pallet — solo si hay columna explícita (no m2/caja)
-        const used = new Set([ci, descIdx, lineaNegocioIdx, cajasPalletIdx, m2CjIdx, m2PeIdx, formatoIdx].filter(x => x >= 0));
-        metIdx = row.findIndex((c, idx) => !used.has(idx) && (c === "M2" || c === "METRAJE" || c.includes("METRO") || c.includes("METRAJE")));
-        break;
-      }
-
-      if (headerIdx < 0 || codIdx < 0) {
-        showFlash("⚠ No se encontró columna CÓDIGO en el archivo", false);
-        setCatalogLoading(false);
-        return;
-      }
-
-      const num = (r: unknown[], idx: number) => idx >= 0 ? (parseFloat(String(r[idx] || "0").replace(",", ".")) || null) : null;
-      const str = (r: unknown[], idx: number) => idx >= 0 ? String(r[idx] || "").trim() || null : null;
-
-      const records: Record<string, unknown>[] = [];
-      for (let i = headerIdx + 1; i < rows.length; i++) {
-        const r   = rows[i] as unknown[];
-        const cod = String(r[codIdx] || "").trim();
-        if (!cod) continue;
-        const cajas = num(r, cajasPalletIdx);
-        const m2cj  = num(r, m2CjIdx);
-        const metraje = num(r, metIdx)
-          ?? (cajas != null && m2cj != null ? Math.round(cajas * m2cj * 10000) / 10000 : null);
-        records.push({
-          codigo:             cod.toUpperCase(),
-          descripcion:        str(r, descIdx),
-          linea_negocio:      str(r, lineaNegocioIdx),
-          cajas_por_pallet:   cajas,
-          m2_x_caja:          m2cj,
-          m2_x_pe:            num(r, m2PeIdx),
-          metraje_por_pallet: metraje,
-          formato:            str(r, formatoIdx),
-        });
-      }
-
-      if (!records.length) {
-        showFlash("⚠ No se encontraron filas válidas (código + metraje > 0)", false);
-        setCatalogLoading(false);
-        return;
-      }
-
-      // Upsert en lotes de 500
-      const BATCH = 500;
-      let done = 0, errors = 0;
-      for (let i = 0; i < records.length; i += BATCH) {
-        const { error } = await db.from("catalogo_metraje")
-          .upsert(records.slice(i, i + BATCH), { onConflict: "codigo" });
-        if (error) errors++;
-        else done += Math.min(BATCH, records.length - i);
-      }
-
-      setCatalogLoading(false);
-      if (errors === 0) {
-        showFlash(`✓ Catálogo cargado: ${done} productos con metraje`);
-        fetchCatalogCount();
-      } else {
-        showFlash(`⚠ ${done} cargados, ${errors} lotes con error`, false);
-      }
-    } catch (e) {
-      setCatalogLoading(false);
-      showFlash(`❌ ${e instanceof Error ? e.message : String(e)}`, false);
+  // ── Load lineas ─────────────────────────────────────────────────────────────
+  const loadLineas = useCallback(async () => {
+    setLoadingLineas(true);
+    let q = db.from("lineas_reubicacion")
+      .select("id,numero_orden,cod_org_inv,codigo,descripcion,subinventario_origen,localizador_origen,lote,cantidad_fisica,pallets,cajas,subinventario_destino,localizador_destino,responsable,inv_pe,notas,estado,created_at")
+      .order("created_at", { ascending: false });
+    if (estadoFilter !== "ALL") q = q.eq("estado", estadoFilter);
+    const { data, error } = await (q as ReturnType<typeof q.limit>).limit(300);
+    if (error) showToast("Error al cargar líneas: " + error.message, false);
+    else {
+      setLineas((data as Linea[]).map(r => ({ ...r, _dirty: false, _new: false })));
     }
-  }
+    setLoadingLineas(false);
+  }, [estadoFilter, showToast]);
 
-  const showFlash = (msg: string, ok = true) => {
-    setFlash({ msg, ok });
-    setTimeout(() => setFlash(null), 3500);
-  };
+  useEffect(() => { loadLineas(); }, [loadLineas]);
 
-  const zonas = [...new Set(rows.map(r => r.zona))].sort();
+  // ── Load catálogo ────────────────────────────────────────────────────────────
+  const loadCatalog = useCallback(async () => {
+    setLoadingCatalog(true);
+    const { data: catData, error: catErr } = await db
+      .from("catalogo_productos")
+      .select("codigo,descripcion,formato,cajas_por_piso,cajas_por_pallet,unidad_de_medida,m2_por_caja,m2_x_pe")
+      .order("codigo");
+    if (catErr) {
+      showToast("Error al cargar catálogo: " + catErr.message, false);
+      setLoadingCatalog(false);
+      return;
+    }
 
-  const filtered = rows
-    .filter(r => {
-      if (filterZona !== "all" && r.zona !== filterZona) return false;
-      if (filterActivo === "activo" && !r.activo) return false;
-      if (filterActivo === "bloqueado" && r.activo) return false;
-      if (search && !r.localizador.toUpperCase().includes(search.toUpperCase()) && !r.zona.toUpperCase().includes(search.toUpperCase())) return false;
-      return true;
-    })
-    .sort((a, b) => {
-      const av = a[sortBy];
-      const bv = b[sortBy];
-      const cmp = typeof av === "string" ? av.localeCompare(String(bv)) : Number(av) - Number(bv);
-      return sortAsc ? cmp : -cmp;
-    });
+    const { data: lineaData } = await db
+      .from("lineas_reubicacion")
+      .select("codigo,descripcion")
+      .not("codigo", "is", null);
 
-  const key = (r: Localizador) => `${r.zona}::${r.localizador}`;
+    const catMap = new Map<string, CatalogRow>();
+    for (const c of (catData as Record<string, unknown>[]) ?? []) {
+      const fmt = extractFormato(String(c.descripcion ?? ""));
+      catMap.set(String(c.codigo), {
+        codigo: String(c.codigo),
+        descripcion: String(c.descripcion ?? ""),
+        formato: (c.formato as string | null) ?? null,
+        cajas_por_piso: (c.cajas_por_piso as number | null) ?? null,
+        cajas_por_pallet: (c.cajas_por_pallet as number | null) ?? null,
+        unidad_de_medida: (c.unidad_de_medida as string | null) ?? null,
+        m2_por_caja: (c.m2_por_caja as number | null) ?? null,
+        m2_x_pe: (c.m2_x_pe as number | null) ?? null,
+        _dirty: false, _new: false,
+        _fmtSugerido: fmt,
+        _emptyFields: getCriticalEmpty(c as Parameters<typeof getCriticalEmpty>[0]),
+      });
+    }
 
-  function toggleSort(col: SortKey) {
-    if (sortBy === col) setSortAsc(p => !p);
-    else { setSortBy(col); setSortAsc(true); }
-  }
+    for (const l of (lineaData as Record<string, unknown>[]) ?? []) {
+      const cod = String(l.codigo ?? "").trim();
+      if (!cod || catMap.has(cod)) continue;
+      const fmt = extractFormato(String(l.descripcion ?? ""));
+      catMap.set(cod, {
+        codigo: cod,
+        descripcion: String(l.descripcion ?? ""),
+        formato: null, cajas_por_piso: null, cajas_por_pallet: null,
+        unidad_de_medida: null, m2_por_caja: null, m2_x_pe: null,
+        _dirty: false, _new: true,
+        _fmtSugerido: fmt,
+        _emptyFields: ["formato", "cajas_x_pallet", "m2_x_pe", "cajas_x_piso"],
+      });
+    }
 
-  function toggleSelect(r: Localizador) {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(key(r))) next.delete(key(r));
-      else next.add(key(r));
+    setCatalog([...catMap.values()]);
+    setLoadingCatalog(false);
+  }, [showToast]);
+
+  useEffect(() => { if (tab === "catalogo") loadCatalog(); }, [tab, loadCatalog]);
+
+  // ── Edit helpers ────────────────────────────────────────────────────────────
+  function editLoc(key: string, field: keyof Loc, value: unknown) {
+    setLocs(prev => prev.map(r => {
+      if (r._key !== key) return r;
+      const next = { ...r, [field]: value, _dirty: true };
+      if (field === "ocupado" || field === "capacidad") {
+        const occ = field === "ocupado"   ? N(value) : N(next.ocupado);
+        const cap = field === "capacidad" ? N(value) : N(next.capacidad);
+        next.disponible    = calcDisp(cap, occ);
+        next.pct_ocupacion = calcPct(occ, cap);
+      }
       return next;
-    });
-  }
-
-  function toggleSelectAll() {
-    if (selected.size === filtered.length) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(filtered.map(key)));
-    }
-  }
-
-  // ── Generate localizador codes for preview ───────────────────────────────
-  function generarLocalizadores(zona: string, desde: number, hasta: number, filas: number, cols: number): string[] {
-    const locs: string[] = [];
-    const z = zona.replace(/\s+/g, "").padStart(2, "0");
-    for (let n = desde; n <= hasta; n++) {
-      for (let f = 1; f <= filas; f++) {
-        for (let c = 1; c <= cols; c++) {
-          const loc = `${z}.${String(n).padStart(2,"0")}.${String(f).padStart(2,"0")}.${String(c).padStart(2,"0")}`;
-          locs.push(loc);
-        }
-      }
-    }
-    return locs;
-  }
-
-  function actualizarPreview() {
-    if (!nzZona.trim()) { setNzPreview([]); return; }
-    const locs = generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols);
-    setNzPreview(locs.slice(0, 30));
-  }
-
-  async function crearZona() {
-    if (!nzZona.trim()) { showFlash("⚠ Ingresa el nombre de la zona", false); return; }
-    const locs = generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols);
-    if (!locs.length) { showFlash("⚠ No se generaron localizadores", false); return; }
-    setSavingZona(true);
-    const records = locs.map(loc => ({
-      zona: nzZona.trim().toUpperCase(),
-      localizador: loc,
-      formato: nzFormato || "Mezcla",
-      capacidad: nzCapacidad,
-      ocupado: 0,
-      disponible: nzCapacidad,
-      pct_ocupacion: 0,
-      activo: true,
     }));
-    const BATCH = 200;
+  }
+
+  function editLinea(id: string, field: keyof Linea, value: unknown) {
+    setLineas(prev => prev.map(r =>
+      r.id === id ? { ...r, [field]: value, _dirty: true } : r
+    ));
+  }
+
+  // ── Add rows ────────────────────────────────────────────────────────────────
+  function addLocRow() {
+    const newRow: LocRow = {
+      zona: zones[0] || "ZONA 1",
+      localizador: "",
+      formato: "Mezcla",
+      capacidad: 0, ocupado: 0, disponible: 0, pct_ocupacion: 0,
+      activo: true,
+      _key: `NEW_${Date.now()}`,
+      _dirty: true,
+      _new: true,
+    };
+    setLocs(prev => [...prev, newRow]);
+  }
+
+  function addLineaRow() {
+    const newRow: LineaRow = {
+      id: `NEW_${Date.now()}`,
+      numero_orden: null, cod_org_inv: null, codigo: null,
+      descripcion: "",
+      subinventario_origen: null, localizador_origen: null, lote: null,
+      cantidad_fisica: 0, pallets: 0, cajas: 0,
+      subinventario_destino: null, localizador_destino: null,
+      responsable: null, inv_pe: null, notas: null,
+      estado: "pendiente",
+      created_at: new Date().toISOString(),
+      _dirty: true, _new: true,
+    };
+    setLineas(prev => [...prev, newRow]);
+  }
+
+  // ── Save locs ───────────────────────────────────────────────────────────────
+  async function saveLocs() {
+    const dirty = locs.filter(r => r._dirty);
+    if (!dirty.length) return showToast("No hay cambios para guardar");
+    setSavingLoc(true);
     let errors = 0;
-    for (let i = 0; i < records.length; i += BATCH) {
-      const { error } = await db.from("localizadores").upsert(records.slice(i, i + BATCH), { onConflict: "zona,localizador" });
+    for (const r of dirty) {
+      const payload: Loc = {
+        zona: r.zona, localizador: r.localizador, formato: r.formato,
+        capacidad: r.capacidad, ocupado: r.ocupado, disponible: r.disponible,
+        pct_ocupacion: r.pct_ocupacion, activo: r.activo,
+      };
+      const { error } = await db.from("localizadores")
+        .upsert(payload, { onConflict: "zona,localizador" });
       if (error) errors++;
     }
-    setSavingZona(false);
-    if (errors > 0) showFlash(`⚠ ${errors} lotes con error`, false);
-    else showFlash(`✓ Zona ${nzZona.toUpperCase()} creada con ${locs.length} localizadores`);
-    setShowNuevaZona(false);
-    setNzZona(""); setNzDesde(1); setNzHasta(10); setNzFilas(1); setNzCols(1); setNzPreview([]);
-    load();
+    setSavingLoc(false);
+    if (errors) showToast(`${errors} errores al guardar`, false);
+    else { showToast(`${dirty.length} localizadores guardados`); loadLocs(); }
   }
 
-  async function saveEdit() {
-    if (!edit) return;
-    setSaving(true);
-    const { error } = await db
-      .from("localizadores")
-      .update({ [edit.field]: edit.value })
-      .eq("zona", edit.zona)
-      .eq("localizador", edit.localizador);
-    setSaving(false);
-    if (error) { showFlash("❌ " + error.message, false); return; }
-    setRows(prev => prev.map(r =>
-      r.zona === edit.zona && r.localizador === edit.localizador
-        ? { ...r, [edit.field]: edit.value }
-        : r
-    ));
-    showFlash(`✓ ${edit.localizador} — ${edit.field} actualizado`);
-    setEdit(null);
+  // ── Save lineas ─────────────────────────────────────────────────────────────
+  async function saveLineas() {
+    const dirty = lineas.filter(r => r._dirty);
+    if (!dirty.length) return showToast("No hay cambios para guardar");
+    setSavingLineas(true);
+    let errors = 0;
+    const now = new Date().toISOString();
+    for (const r of dirty) {
+      if (r._new) {
+        const { error } = await db.from("lineas_reubicacion").insert({
+          numero_orden: r.numero_orden, cod_org_inv: r.cod_org_inv, codigo: r.codigo,
+          descripcion: r.descripcion,
+          subinventario_origen: r.subinventario_origen, localizador_origen: r.localizador_origen,
+          lote: r.lote, cantidad_fisica: r.cantidad_fisica, pallets: r.pallets, cajas: r.cajas,
+          subinventario_destino: r.subinventario_destino, localizador_destino: r.localizador_destino,
+          responsable: r.responsable, inv_pe: r.inv_pe, notas: r.notas,
+          estado: "pendiente", created_at: now, updated_at: now,
+        });
+        if (error) errors++;
+      } else {
+        const { error } = await db.from("lineas_reubicacion")
+          .update({
+            numero_orden: r.numero_orden, cod_org_inv: r.cod_org_inv, codigo: r.codigo,
+            descripcion: r.descripcion,
+            subinventario_origen: r.subinventario_origen, localizador_origen: r.localizador_origen,
+            lote: r.lote, cantidad_fisica: r.cantidad_fisica, pallets: r.pallets, cajas: r.cajas,
+            subinventario_destino: r.subinventario_destino, localizador_destino: r.localizador_destino,
+            responsable: r.responsable, inv_pe: r.inv_pe, notas: r.notas,
+            updated_at: now,
+          })
+          .eq("id", r.id);
+        if (error) errors++;
+      }
+    }
+    setSavingLineas(false);
+    if (errors) showToast(`${errors} errores al guardar`, false);
+    else { showToast(`${dirty.length} líneas guardadas`); loadLineas(); }
   }
 
-  async function toggleBlock(r: Localizador) {
-    setSaving(true);
-    const newActivo = !r.activo;
-    const { error } = await db
-      .from("localizadores")
-      .update({ activo: newActivo })
-      .eq("zona", r.zona)
-      .eq("localizador", r.localizador);
-    setSaving(false);
-    if (error) { showFlash("❌ " + error.message, false); return; }
-    setRows(prev => prev.map(row =>
-      row.zona === r.zona && row.localizador === r.localizador
-        ? { ...row, activo: newActivo }
-        : row
-    ));
-    showFlash(`✓ ${r.localizador} ${r.activo ? "bloqueado" : "desbloqueado"}`);
-  }
-
-  async function applyBulk() {
-    if (bulkActivo === null && bulkCapacidad === "") { showFlash("⚠ Define al menos un cambio", false); return; }
-    const newCapacidad = bulkCapacidad !== "" ? Number(bulkCapacidad) : undefined;
-
-    const targets = filtered.filter(r => {
-      if (!selected.has(key(r))) return false;
-      if (bulkActivo !== null && r.activo !== bulkActivo) return true;
-      if (newCapacidad !== undefined && r.capacidad !== newCapacidad) return true;
-      return false;
-    });
-    if (!targets.length) { showFlash("⚠ Selecciona al menos una fila (o no hay cambios reales)", false); return; }
-
-    setSaving(true);
-    const payload = targets.map(r => ({
-      ...r,
-      ...(bulkActivo !== null ? { activo: bulkActivo } : {}),
-      ...(newCapacidad !== undefined ? { capacidad: newCapacidad } : {}),
+  // ── Range update – Locs ─────────────────────────────────────────────────────
+  function applyRangeLoc() {
+    const from = Math.max(0, parseInt(rangeFromLoc) - 1);
+    const to   = Math.min(locs.length - 1, parseInt(rangeToLoc) - 1);
+    if (isNaN(from) || isNaN(to) || from > to) return showToast("Rango inválido", false);
+    let count = 0;
+    setLocs(prev => prev.map((r, i) => {
+      if (i < from || i > to) return r;
+      count++;
+      const next = { ...r, _dirty: true };
+      if (rangeFieldLoc === "activo") {
+        next.activo = rangeValueLoc === "true" || rangeValueLoc === "1";
+      } else if (rangeFieldLoc === "capacidad" || rangeFieldLoc === "ocupado") {
+        (next as Record<string, unknown>)[rangeFieldLoc] = N(rangeValueLoc);
+        const cap = rangeFieldLoc === "capacidad" ? N(rangeValueLoc) : r.capacidad;
+        const occ = rangeFieldLoc === "ocupado"   ? N(rangeValueLoc) : r.ocupado;
+        next.disponible    = calcDisp(cap, occ);
+        next.pct_ocupacion = calcPct(occ, cap);
+      } else {
+        (next as Record<string, unknown>)[rangeFieldLoc] = rangeValueLoc;
+      }
+      return next;
     }));
-    const { error } = await db.from("localizadores").upsert(payload, { onConflict: "zona,localizador" });
-    setSaving(false);
-    if (error) { showFlash(`❌ ${error.message}`, false); return; }
-    setRows(prev => prev.map(r => {
-      const updated = payload.find(p => p.zona === r.zona && p.localizador === r.localizador);
-      return updated ?? r;
-    }));
-    showFlash(`✓ ${targets.length} ubicaciones actualizadas`);
-    setSelected(new Set());
-    setBulkActivo(null);
-    setBulkCapacidad("");
-    setShowBulk(false);
+    showToast(`Valor aplicado a ${count} filas. Presiona GUARDAR para confirmar.`);
   }
 
-  const stats = {
-    total: rows.length,
-    activas: rows.filter(r => r.activo).length,
-    bloqueadas: rows.filter(r => !r.activo).length,
-    conStock: rows.filter(r => r.ocupado > 0).length,
-    libres: rows.reduce((s, r) => s + Math.max(0, r.disponible || 0), 0),
-  };
+  // ── Range update – Lineas ───────────────────────────────────────────────────
+  function applyRangeLineas() {
+    const from = Math.max(0, parseInt(rangeFromLineas) - 1);
+    const to   = Math.min(lineas.length - 1, parseInt(rangeToLineas) - 1);
+    if (isNaN(from) || isNaN(to) || from > to) return showToast("Rango inválido", false);
+    let count = 0;
+    setLineas(prev => prev.map((r, i) => {
+      if (i < from || i > to) return r;
+      count++;
+      const next = { ...r, _dirty: true };
+      const numFields = ["pallets", "cajas", "cantidad_fisica", "inv_pe"];
+      if (numFields.includes(rangeFieldLineas)) {
+        (next as Record<string, unknown>)[rangeFieldLineas] = N(rangeValueLineas) || null;
+      } else {
+        (next as Record<string, unknown>)[rangeFieldLineas] = rangeValueLineas || null;
+      }
+      return next;
+    }));
+    showToast(`Valor aplicado a ${count} filas. Presiona GUARDAR para confirmar.`);
+  }
 
+  // ── Catalog helpers ─────────────────────────────────────────────────────────
+  function editCatalog(codigo: string, field: keyof CatalogRow, value: unknown) {
+    setCatalog(prev => prev.map(r => {
+      if (r.codigo !== codigo) return r;
+      const next = { ...r, [field]: value, _dirty: true };
+      next._emptyFields = getCriticalEmpty(next);
+      return next;
+    }));
+  }
+
+  async function saveCatalog() {
+    const dirty = catalog.filter(r => r._dirty);
+    if (!dirty.length) return showToast("No hay cambios para guardar");
+    setSavingCatalog(true);
+    let errors = 0;
+    for (const r of dirty) {
+      const { error } = await db.from("catalogo_productos").upsert({
+        codigo: r.codigo,
+        descripcion: r.descripcion,
+        formato: r.formato || null,
+        cajas_por_piso: r.cajas_por_piso || null,
+        cajas_por_pallet: r.cajas_por_pallet || null,
+        unidad_de_medida: r.unidad_de_medida || null,
+        m2_por_caja: r.m2_por_caja || null,
+        m2_x_pe: r.m2_x_pe || null,
+      }, { onConflict: "codigo" });
+      if (error) errors++;
+    }
+    setSavingCatalog(false);
+    if (errors) showToast(`${errors} errores al guardar`, false);
+    else { showToast(`${dirty.length} productos guardados`); loadCatalog(); }
+  }
+
+  function autoDetectFormatos() {
+    let count = 0;
+    setCatalog(prev => prev.map(r => {
+      if (r.formato || !r._fmtSugerido) return r;
+      count++;
+      const next = { ...r, formato: r._fmtSugerido, _dirty: true };
+      next._emptyFields = getCriticalEmpty(next);
+      return next;
+    }));
+    if (count === 0) showToast("No hay formatos por detectar");
+    else showToast(`${count} formatos detectados automáticamente. Presiona GUARDAR para confirmar.`);
+  }
+
+  // ── File diff – CAL_LOC ─────────────────────────────────────────────────────
+  async function handleLocFile(file: File) {
+    setDiffLoading(true);
+    setDiffData(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const wb  = XLSX.read(buf, { type: "array" });
+      if (!wb.SheetNames.includes("CAL_LOC")) {
+        showToast("El archivo no contiene hoja CAL_LOC", false);
+        setDiffLoading(false);
+        return;
+      }
+      const incoming = parseCalLoc(wb);
+      const { data: dbData, error } = await db.from("localizadores")
+        .select("zona,localizador,formato,capacidad,ocupado,disponible,pct_ocupacion,activo");
+      if (error) throw new Error(error.message);
+      const dbMap: Record<string, Loc> = {};
+      (dbData as Loc[]).forEach(r => { dbMap[`${r.zona}|${r.localizador}`] = r; });
+
+      const changed: Loc[] = [];
+      const newRows: Loc[] = [];
+      let unchanged = 0;
+      for (const row of incoming) {
+        const existing = dbMap[`${row.zona}|${row.localizador}`];
+        if (!existing) {
+          newRows.push(row);
+        } else if (existing.formato !== row.formato || existing.capacidad !== row.capacidad) {
+          changed.push(row);
+        } else {
+          unchanged++;
+        }
+      }
+      setDiffData({ changed, newRows, unchanged });
+    } catch (e) {
+      showToast("Error al procesar: " + (e instanceof Error ? e.message : String(e)), false);
+    }
+    setDiffLoading(false);
+  }
+
+  async function applyDiff() {
+    if (!diffData) return;
+    setApplyingDiff(true);
+    const toApply = [...diffData.changed, ...diffData.newRows];
+    const BATCH = 200;
+    let errors = 0;
+    for (let i = 0; i < toApply.length; i += BATCH) {
+      const { error } = await db.from("localizadores")
+        .upsert(toApply.slice(i, i + BATCH), { onConflict: "zona,localizador" });
+      if (error) errors++;
+    }
+    setApplyingDiff(false);
+    if (errors) showToast("Errores al aplicar", false);
+    else { showToast(`${toApply.length} registros actualizados`); setDiffData(null); loadLocs(); }
+  }
+
+  // ── File upload – Lineas ────────────────────────────────────────────────────
+  async function handleLineasFile(file: File) {
+    setUploadingLineas(true);
+    try {
+      const { data: session } = await db.auth.getSession();
+      const token = session?.session?.access_token;
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("http://localhost:8000/upload/excel", {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.detail || "Error del servidor");
+      showToast(`${result.count} registros procesados (${result.type})`);
+      if (result.type === "produccion") loadLineas();
+    } catch (e) {
+      showToast("Error: " + (e instanceof Error ? e.message : String(e)), false);
+    }
+    setUploadingLineas(false);
+  }
+
+  // ── Derived ──────────────────────────────────────────────────────────────────
+  const dirtyLocs    = locs.filter(r => r._dirty).length;
+  const dirtyLineas  = lineas.filter(r => r._dirty).length;
+  const dirtyCatalog = catalog.filter(r => r._dirty).length;
+  const visibleCatalog = catFilter === "empty"
+    ? catalog.filter(r => r._emptyFields.length > 0)
+    : catalog;
+
+  // ── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div style={s.root} className="page-root">
-      {flash && (
-        <div style={{ ...s.flash, borderColor: flash.ok ? "rgba(74,222,128,0.4)" : "rgba(248,113,113,0.4)", color: flash.ok ? "#4ade80" : "#f87171" }}>
-          {flash.msg}
+    <div style={s.root}>
+      {toast && (
+        <div style={{
+          ...s.toast,
+          background:   toast.ok ? "#14532d" : "#450a0a",
+          borderColor:  toast.ok ? "#22c55e"  : "#ef4444",
+        }}>
+          {toast.msg}
         </div>
       )}
 
-      <div style={s.pageHeader}>
-        <div style={s.badge}>CONFIGURACIÓN — LOCALIZADORES</div>
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 12 }}>
-          <div>
-            <h1 style={s.title}>Gestión de Ubicaciones</h1>
-            <p style={s.sub}>Modifica capacidad, formato, o bloquea ubicaciones para que no aparezcan en el mapa</p>
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
-            {selected.size > 0 && (
-              <button style={s.btnBulk} onClick={() => setShowBulk(true)}>
-                ✎ Editar {selected.size} seleccionadas
-              </button>
-            )}
-            <button style={{ ...s.btnBulk, background: "#0c4a6e", borderColor: "#0ea5e9" }} onClick={() => { setShowNuevaZona(true); setNzPreview([]); }}>
-              + NUEVA ZONA
-            </button>
-            <button style={s.btnRefresh} onClick={load}>↻ Recargar</button>
-          </div>
-        </div>
+      {/* Header */}
+      <div style={s.header}>
+        <div style={s.badge}>ADMIN CONFIG</div>
+        <h1 style={s.title}>Panel de Configuración</h1>
+        <p style={s.sub}>Gestión de datos maestros · sin eliminación de registros</p>
       </div>
 
-      {/* ── CATÁLOGO DE METRAJE ─────────────────────────────────────────── */}
-      <div
-        style={{ ...s.catalogBox, borderColor: catalogDragging ? "#f97316" : "rgba(249,115,22,0.2)", background: catalogDragging ? "rgba(249,115,22,0.04)" : "#f8fafc" }}
-        onDragOver={e => { e.preventDefault(); setCatalogDragging(true); }}
-        onDragLeave={() => setCatalogDragging(false)}
-        onDrop={e => { e.preventDefault(); setCatalogDragging(false); const f = e.dataTransfer.files[0]; if (f) uploadCatalog(f); }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, flexWrap: "wrap" as const }}>
-          <span style={{ fontSize: 18 }}>📐</span>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#0f172a", letterSpacing: 0.5 }}>
-              Catálogo de Metraje
-              {catalogCount !== null && (
-                <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: catalogCount > 0 ? "#4ade80" : "#94a3b8" }}>
-                  {catalogCount > 0 ? `✓ ${catalogCount.toLocaleString()} productos` : "Sin datos — sube el catálogo"}
-                </span>
+      {/* Tab bar */}
+      <div style={s.tabBar}>
+        <button
+          style={{ ...s.tab, ...(tab === "loc" ? s.tabActive : {}) }}
+          onClick={() => setTab("loc")}
+        >
+          ⬡ LOCALIZADORES
+          {dirtyLocs > 0 && <span style={s.dirtyBadge}>{dirtyLocs}</span>}
+        </button>
+        <button
+          style={{ ...s.tab, ...(tab === "lineas" ? s.tabActive : {}) }}
+          onClick={() => setTab("lineas")}
+        >
+          📋 LÍNEAS REUBICACIÓN
+          {dirtyLineas > 0 && <span style={s.dirtyBadge}>{dirtyLineas}</span>}
+        </button>
+        <button
+          style={{ ...s.tab, ...(tab === "catalogo" ? s.tabActive : {}) }}
+          onClick={() => setTab("catalogo")}
+        >
+          📦 CATÁLOGO PRODUCTOS
+          {dirtyCatalog > 0 && <span style={s.dirtyBadge}>{dirtyCatalog}</span>}
+        </button>
+      </div>
+
+      {/* ══ LOCALIZADORES ══════════════════════════════════════════════════════ */}
+      {tab === "loc" && (
+        <div>
+          {/* Controls */}
+          <div style={s.controls}>
+            <select style={s.sel} value={zoneFilter} onChange={e => setZoneFilter(e.target.value)}>
+              <option value="ALL">Todas las zonas</option>
+              {zones.map(z => <option key={z} value={z}>{z}</option>)}
+            </select>
+
+            <button style={s.btnOrange} onClick={addLocRow}>+ AGREGAR FILA</button>
+
+            <button
+              style={{ ...s.btnOrange, opacity: dirtyLocs ? 1 : 0.4 }}
+              onClick={saveLocs}
+              disabled={savingLoc}
+            >
+              {savingLoc ? "Guardando…" : `GUARDAR CAMBIOS${dirtyLocs ? ` (${dirtyLocs})` : ""}`}
+            </button>
+
+            <button style={s.btnGray} onClick={() => setShowRangeLoc(v => !v)}>
+              {showRangeLoc ? "▲" : "▼"} RANGO
+            </button>
+
+            <button style={s.btnGray} onClick={() => { setShowDiff(v => !v); setDiffData(null); }}>
+              {showDiff ? "▲" : "▼"} SUBIR ARCHIVO
+            </button>
+          </div>
+
+          {/* Range panel – Locs */}
+          {showRangeLoc && (
+            <div style={s.panel}>
+              <div style={s.panelTitle}>ACTUALIZAR POR RANGO</div>
+              <div style={s.rangeRow}>
+                <label style={s.rangeLabel}>Filas</label>
+                <input style={{ ...s.inp, width: 64 }} type="number" min="1"
+                  value={rangeFromLoc} onChange={e => setRangeFromLoc(e.target.value)} placeholder="desde" />
+                <span style={s.rangeLabel}>—</span>
+                <input style={{ ...s.inp, width: 64 }} type="number" min="1"
+                  value={rangeToLoc} onChange={e => setRangeToLoc(e.target.value)} placeholder="hasta" />
+
+                <label style={s.rangeLabel}>Campo</label>
+                <select style={s.sel} value={rangeFieldLoc} onChange={e => setRangeFieldLoc(e.target.value)}>
+                  <option value="formato">Formato</option>
+                  <option value="capacidad">Capacidad</option>
+                  <option value="ocupado">Ocupado</option>
+                  <option value="activo">Activo</option>
+                </select>
+
+                <label style={s.rangeLabel}>Valor</label>
+                {rangeFieldLoc === "activo" ? (
+                  <select style={s.sel} value={rangeValueLoc} onChange={e => setRangeValueLoc(e.target.value)}>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                ) : (
+                  <input style={s.inp} value={rangeValueLoc}
+                    onChange={e => setRangeValueLoc(e.target.value)} placeholder="nuevo valor" />
+                )}
+
+                <button style={s.btnOrange} onClick={applyRangeLoc}>APLICAR</button>
+              </div>
+              <p style={s.hint}>
+                Los cambios se marcan en naranja · presiona GUARDAR CAMBIOS para confirmar en BD
+              </p>
+            </div>
+          )}
+
+          {/* Diff panel */}
+          {showDiff && (
+            <div style={s.panel}>
+              <div style={s.panelTitle}>SUBIR ARCHIVO CAL_LOC — DETECCIÓN DE CAMBIOS</div>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+                <button style={s.btnOrange} disabled={diffLoading}
+                  onClick={() => fileRefLoc.current?.click()}>
+                  {diffLoading ? "Analizando…" : "SELECCIONAR EXCEL"}
+                </button>
+                <input ref={fileRefLoc} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+                  onChange={e => { const f = e.target.files?.[0]; if (f) { handleLocFile(f); e.target.value = ""; } }} />
+                <span style={{ fontSize: 11, color: "#6b7280" }}>Requiere hoja CAL_LOC</span>
+              </div>
+
+              {diffData && (
+                <div style={s.diffBox}>
+                  <div style={s.diffStats}>
+                    <div style={{ color: "#fbbf24" }}>~ {diffData.changed.length} modificados</div>
+                    <div style={{ color: "#4ade80" }}>+ {diffData.newRows.length} nuevos</div>
+                    <div style={{ color: "#6b7280" }}>=  {diffData.unchanged} sin cambios</div>
+                  </div>
+                  {diffData.changed.length + diffData.newRows.length === 0 ? (
+                    <p style={{ fontSize: 12, color: "#4ade80", marginTop: 10 }}>
+                      ✓ Sin cambios — la BD ya está actualizada
+                    </p>
+                  ) : (
+                    <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+                      <button style={s.btnOrange} onClick={applyDiff} disabled={applyingDiff}>
+                        {applyingDiff
+                          ? "Aplicando…"
+                          : `APLICAR CAMBIOS (${diffData.changed.length + diffData.newRows.length})`}
+                      </button>
+                      <button style={s.btnGray} onClick={() => setDiffData(null)}>DESCARTAR</button>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
-            <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>
-              Excel con columnas <code style={{ color: "#f97316" }}>CÓDIGO</code> y <code style={{ color: "#f97316" }}>METRAJE</code> (m² por pallet) · Arrastra o haz clic en subir
-            </div>
-          </div>
-        </div>
-        <button
-          style={{ ...s.btnBulk, background: catalogLoading ? "#374151" : "#c2410c", borderColor: "transparent", opacity: catalogLoading ? 0.6 : 1, flexShrink: 0 }}
-          onClick={() => catalogRef.current?.click()}
-          disabled={catalogLoading}
-        >
-          {catalogLoading ? "⟳ Cargando…" : "↑ SUBIR CATÁLOGO"}
-        </button>
-        <input ref={catalogRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
-          onChange={e => { const f = e.target.files?.[0]; if (f) { uploadCatalog(f); e.target.value = ""; } }} />
-      </div>
-
-      {/* ── OPERADORES ───────────────────────────────────────────────────── */}
-      <div style={s.opSection}>
-        {/* Header de la sección */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 10, marginBottom: 14 }}>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#0f172a", letterSpacing: 0.5 }}>
-              👷 Operadores
-              <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: operadores.filter(o => o.activo).length > 0 ? "#4ade80" : "#94a3b8" }}>
-                {operadores.filter(o => o.activo).length} activos · {operadores.length} total
-              </span>
-            </div>
-            <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>
-              Importa desde Excel (columnas: NOMBRE, CÉDULA, EMAIL) o agrega manualmente
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button style={{ ...s.btnBulk, background: "#166534", borderColor: "#22c55e" }}
-              onClick={() => setShowOpForm(v => !v)}>
-              + AGREGAR
-            </button>
-            <button style={{ ...s.btnBulk, background: "#c2410c", borderColor: "transparent" }}
-              onClick={() => opFileRef.current?.click()} disabled={opImporting}>
-              {opImporting ? "⟳ Importando…" : "↑ IMPORTAR EXCEL"}
-            </button>
-            <input ref={opFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
-              onChange={e => { const f = e.target.files?.[0]; if (f) { importarOperadores(f); e.target.value = ""; } }} />
-          </div>
-        </div>
-
-        {/* Formulario nuevo operador */}
-        {showOpForm && (
-          <div style={s.opFormBox}>
-            <div style={{ fontSize: 9, letterSpacing: 2, color: "#f97316", fontWeight: 600, marginBottom: 12 }}>NUEVO OPERADOR</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 14px", marginBottom: 12 }}>
-              <div>
-                <label style={s.fieldLabel}>NOMBRE *</label>
-                <input style={s.fieldInput} value={newOp.nombre} placeholder="JUAN PÉREZ"
-                  onChange={e => setNewOp(p => ({ ...p, nombre: e.target.value.toUpperCase() }))} />
-              </div>
-              <div>
-                <label style={s.fieldLabel}>ROL</label>
-                <select style={s.fieldInput} value={newOp.rol}
-                  onChange={e => setNewOp(p => ({ ...p, rol: e.target.value }))}>
-                  <option value="OPERADOR">OPERADOR</option>
-                  <option value="SUPERVISOR">SUPERVISOR</option>
-                  <option value="JEFATURA">JEFATURA</option>
-                </select>
-              </div>
-              <div>
-                <label style={s.fieldLabel}>EMAIL</label>
-                <input style={s.fieldInput} value={newOp.email} placeholder="juan@empresa.com"
-                  onChange={e => setNewOp(p => ({ ...p, email: e.target.value }))} />
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button style={{ ...s.btnBulk, background: "#166534", borderColor: "#22c55e" }}
-                onClick={agregarOperador}>GUARDAR →</button>
-              <button style={s.btnRefresh} onClick={() => { setShowOpForm(false); setNewOp({ nombre: "", rol: "OPERADOR", email: "" }); }}>Cancelar</button>
-            </div>
-          </div>
-        )}
-
-        {/* Lista de operadores */}
-        {opLoading ? (
-          <div style={{ fontSize: 11, color: "#64748b", padding: 16 }}>Cargando operadores…</div>
-        ) : operadores.length === 0 ? (
-          <div style={{ fontSize: 11, color: "#94a3b8", padding: "16px 0", textAlign: "center" as const }}>
-            Sin operadores registrados — importa el Excel del otro proyecto o agrega manualmente
-          </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
-            {operadores.map(op => (
-              <div key={op.id} style={{ ...s.opCard, opacity: op.activo ? 1 : 0.5 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{op.nombre}</div>
-                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>
-                    {op.rol   && <span style={{ marginRight: 8, background: op.rol === "OPERADOR" ? "#dbeafe" : op.rol === "SUPERVISOR" ? "#dcfce7" : "#fef3c7", color: op.rol === "OPERADOR" ? "#1d4ed8" : op.rol === "SUPERVISOR" ? "#15803d" : "#92400e", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 700 }}>{op.rol}</span>}
-                    {op.email && <span>{op.email}</span>}
-                  </div>
-                </div>
-                <button
-                  style={{ ...s.actionBtn, borderColor: op.activo ? "rgba(248,113,113,0.4)" : "rgba(74,222,128,0.4)", color: op.activo ? "#f87171" : "#4ade80", flexShrink: 0 }}
-                  onClick={() => toggleOperador(op)}
-                >
-                  {op.activo ? "Desactivar" : "Activar"}
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Stats */}
-      <div style={s.statsRow}>
-        {[
-          { l: "TOTAL", v: stats.total, c: "#e2e8f0" },
-          { l: "ACTIVAS", v: stats.activas, c: "#4ade80" },
-          { l: "BLOQUEADAS", v: stats.bloqueadas, c: "#f87171" },
-          { l: "CON STOCK", v: stats.conStock, c: "#fbbf24" },
-          { l: "PALLETS LIBRES", v: stats.libres, c: "#60a5fa" },
-        ].map(st => (
-          <div key={st.l} style={s.statCard}>
-            <div style={{ fontSize: 22, fontWeight: 700, color: st.c }}>{st.v}</div>
-            <div style={s.statLabel}>{st.l}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Filtros */}
-      <div style={s.filters}>
-        <input
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Buscar localizador…"
-          style={s.searchInput}
-        />
-        <select value={filterZona} onChange={e => setFilterZona(e.target.value)} style={s.select}>
-          <option value="all">Todas las zonas</option>
-          {zonas.map(z => <option key={z} value={z}>{z}</option>)}
-        </select>
-        <select value={filterActivo} onChange={e => setFilterActivo(e.target.value as typeof filterActivo)} style={s.select}>
-          <option value="all">Activas + Bloqueadas</option>
-          <option value="activo">Solo activas</option>
-          <option value="bloqueado">Solo bloqueadas</option>
-        </select>
-        <span style={{ fontSize: 11, color: "#64748b", marginLeft: "auto" }}>
-          {filtered.length} / {rows.length} ubicaciones
-        </span>
-      </div>
-
-      {/* Tabla */}
-      {loading ? (
-        <div style={s.loading}>Cargando ubicaciones…</div>
-      ) : (
-        <div style={s.tableWrap}>
-          <table style={s.table}>
-            <thead>
-              <tr style={s.thead}>
-                <th style={{ ...s.th, width: 32 }}>
-                  <input
-                    type="checkbox"
-                    checked={selected.size === filtered.length && filtered.length > 0}
-                    onChange={toggleSelectAll}
-                    style={{ cursor: "pointer" }}
-                  />
-                </th>
-                {(["zona", "localizador", "formato", "capacidad", "ocupado", "disponible", "pct_ocupacion"] as SortKey[]).map(col => (
-                  <th key={col} style={{ ...s.th, cursor: "pointer" }} onClick={() => toggleSort(col)}>
-                    {col.replace("_", " ").toUpperCase()}{" "}
-                    {sortBy === col ? (sortAsc ? "↑" : "↓") : ""}
-                  </th>
-                ))}
-                <th style={s.th}>ESTADO</th>
-                <th style={s.th}>ACCIONES</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((r, i) => {
-                const isSelected = selected.has(key(r));
-                const pct = (r.pct_ocupacion * 100).toFixed(1);
-                const pctColor = r.pct_ocupacion > 1.0 ? "#f87171" : r.pct_ocupacion >= 0.8 ? "#fbbf24" : r.pct_ocupacion > 0 ? "#4ade80" : "#374151";
-                return (
-                  <tr key={key(r)} style={{ ...s.tr, background: isSelected ? "rgba(37,99,235,0.08)" : (i % 2 === 0 ? "transparent" : "#0d1117"), opacity: r.activo ? 1 : 0.5 }}>
-                    <td style={s.td}>
-                      <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(r)} style={{ cursor: "pointer" }} />
-                    </td>
-                    <td style={{ ...s.td, color: "#6b7280" }}>{r.zona}</td>
-                    <td style={{ ...s.td, color: "#f97316", fontWeight: 700 }}>{r.localizador}</td>
-
-                    {/* Formato editable */}
-                    <td style={s.td}>
-                      {edit?.localizador === r.localizador && edit.zona === r.zona && edit.field === "formato" ? (
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <input
-                            style={s.inlineInput}
-                            value={String(edit.value)}
-                            onChange={e => setEdit(p => p ? { ...p, value: e.target.value } : p)}
-                            autoFocus
-                          />
-                          <button style={s.btnSave} onClick={saveEdit} disabled={saving}>✓</button>
-                          <button style={s.btnCancel} onClick={() => setEdit(null)}>✗</button>
-                        </div>
-                      ) : (
-                        <span
-                          style={{ color: "#64748b", cursor: "pointer", borderBottom: "1px dashed rgba(249,115,22,0.3)" }}
-                          onClick={() => setEdit({ localizador: r.localizador, zona: r.zona, field: "formato", value: r.formato || "" })}
-                          title="Click para editar"
-                        >
-                          {r.formato || "—"}
-                        </span>
-                      )}
-                    </td>
-
-                    {/* Capacidad editable */}
-                    <td style={{ ...s.td, textAlign: "right" as const }}>
-                      {edit?.localizador === r.localizador && edit.zona === r.zona && edit.field === "capacidad" ? (
-                        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                          <input
-                            style={{ ...s.inlineInput, width: 70, textAlign: "right" as const }}
-                            type="number"
-                            value={String(edit.value)}
-                            onChange={e => setEdit(p => p ? { ...p, value: Number(e.target.value) } : p)}
-                            autoFocus
-                          />
-                          <button style={s.btnSave} onClick={saveEdit} disabled={saving}>✓</button>
-                          <button style={s.btnCancel} onClick={() => setEdit(null)}>✗</button>
-                        </div>
-                      ) : (
-                        <span
-                          style={{ color: "#1e293b", cursor: "pointer", borderBottom: "1px dashed rgba(249,115,22,0.3)", fontWeight: 700 }}
-                          onClick={() => setEdit({ localizador: r.localizador, zona: r.zona, field: "capacidad", value: r.capacidad })}
-                          title="Click para editar"
-                        >
-                          {r.capacidad}
-                        </span>
-                      )}
-                    </td>
-
-                    <td style={{ ...s.td, textAlign: "right" as const, color: r.ocupado > 0 ? "#fbbf24" : "#374151" }}>{r.ocupado}</td>
-                    <td style={{ ...s.td, textAlign: "right" as const, color: r.disponible > 0 ? "#4ade80" : "#f87171" }}>{r.disponible}</td>
-                    <td style={{ ...s.td, textAlign: "right" as const, color: pctColor, fontWeight: 700 }}>{pct}%</td>
-
-                    <td style={s.td}>
-                      <span style={{
-                        display: "inline-block",
-                        fontSize: 9, letterSpacing: 1, fontWeight: 700, padding: "2px 8px", borderRadius: 2,
-                        background: r.activo ? "#0f2a0f" : "#2a0f0f",
-                        color: r.activo ? "#4ade80" : "#f87171",
-                      }}>
-                        {r.activo ? "ACTIVA" : "BLOQUEADA"}
-                      </span>
-                    </td>
-
-                    <td style={s.td}>
-                      <button
-                        style={{ ...s.actionBtn, borderColor: r.activo ? "rgba(248,113,113,0.4)" : "rgba(74,222,128,0.4)", color: r.activo ? "#f87171" : "#4ade80" }}
-                        onClick={() => toggleBlock(r)}
-                        disabled={saving}
-                        title={r.activo ? "Bloquear ubicación" : "Desbloquear ubicación"}
-                      >
-                        {r.activo ? "🔒 Bloquear" : "🔓 Activar"}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {filtered.length === 0 && (
-            <div style={s.empty}>No hay ubicaciones con los filtros actuales</div>
           )}
-        </div>
-      )}
 
-      {/* Modal edición masiva */}
-      {showBulk && (
-        <div style={s.overlay} onClick={() => setShowBulk(false)}>
-          <div style={s.modalBox} onClick={e => e.stopPropagation()}>
-            <div style={s.modalTitle}>✎ EDICIÓN MASIVA — {selected.size} UBICACIONES</div>
-            <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 16px" }}>
-              Solo los campos que completes serán actualizados. Deja vacío lo que no quieras cambiar.
-            </p>
-
-            <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
-              <div>
-                <label style={s.fieldLabel}>ESTADO</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  {[
-                    { v: null, l: "Sin cambio" },
-                    { v: true, l: "Activar todas" },
-                    { v: false, l: "Bloquear todas" },
-                  ].map(opt => (
-                    <button
-                      key={String(opt.v)}
-                      style={{
-                        ...s.toggleOpt,
-                        background: bulkActivo === opt.v ? "#f97316" : "transparent",
-                        color: bulkActivo === opt.v ? "#000" : "#6b7280",
-                      }}
-                      onClick={() => setBulkActivo(opt.v)}
-                    >
-                      {opt.l}
-                    </button>
+          {/* Table */}
+          <div style={s.tableWrap}>
+            {loadingLoc ? (
+              <div style={s.loading}>Cargando localizadores…</div>
+            ) : (
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    {["#","ZONA","LOCALIZADOR","FORMATO","CAPACIDAD","OCUPADO","DISPONIBLE","PCT %","ACTIVO",""].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {locs.map((r, i) => (
+                    <tr key={r._key} style={{
+                      background: r._dirty
+                        ? "rgba(249,115,22,0.07)"
+                        : i % 2 === 0 ? "#0d1117" : "#080c14",
+                    }}>
+                      <td style={{ ...s.td, color: "#4a5568", width: 36 }}>{i + 1}</td>
+                      <td style={s.td}>
+                        {r._new ? (
+                          <select style={s.cellSel} value={r.zona}
+                            onChange={e => editLoc(r._key, "zona", e.target.value)}>
+                            {zones.map(z => <option key={z} value={z}>{z}</option>)}
+                          </select>
+                        ) : (
+                          <span style={{ color: "#f97316", fontSize: 11 }}>{r.zona}</span>
+                        )}
+                      </td>
+                      <td style={s.td}>
+                        {r._new ? (
+                          <input style={{ ...s.cellInp, width: 80 }} value={r.localizador}
+                            onChange={e => editLoc(r._key, "localizador", e.target.value)}
+                            placeholder="LOC" />
+                        ) : (
+                          <span style={{ color: "#e2e8f0", fontSize: 11 }}>{r.localizador}</span>
+                        )}
+                      </td>
+                      <td style={s.td}>
+                        <input style={{ ...s.cellInp, width: 90 }} value={r.formato}
+                          onChange={e => editLoc(r._key, "formato", e.target.value)} />
+                      </td>
+                      <td style={s.td}>
+                        <input style={{ ...s.cellInp, width: 68 }} type="number" value={r.capacidad}
+                          onChange={e => editLoc(r._key, "capacidad", N(e.target.value))} />
+                      </td>
+                      <td style={s.td}>
+                        <input style={{ ...s.cellInp, width: 68 }} type="number" value={r.ocupado}
+                          onChange={e => editLoc(r._key, "ocupado", N(e.target.value))} />
+                      </td>
+                      <td style={{ ...s.td, color: "#6b7280", fontSize: 11 }}>{r.disponible}</td>
+                      <td style={{
+                        ...s.td, fontSize: 11,
+                        color: r.pct_ocupacion > 0.8 ? "#f87171" : r.pct_ocupacion > 0.6 ? "#fbbf24" : "#4ade80",
+                      }}>
+                        {(r.pct_ocupacion * 100).toFixed(1)}%
+                      </td>
+                      <td style={s.td}>
+                        <input type="checkbox" checked={r.activo}
+                          onChange={e => editLoc(r._key, "activo", e.target.checked)} />
+                      </td>
+                      <td style={{ ...s.td, width: 16 }}>
+                        {r._dirty && <span style={{ color: "#f97316", fontSize: 10 }}>●</span>}
+                      </td>
+                    </tr>
                   ))}
-                </div>
-              </div>
-
-              <div>
-                <label style={s.fieldLabel}>CAPACIDAD (dejar vacío = sin cambio)</label>
-                <input
-                  style={s.fieldInput}
-                  type="number"
-                  placeholder="Ej: 20"
-                  value={bulkCapacidad}
-                  onChange={e => setBulkCapacidad(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-              <button
-                style={{ ...s.modalBtn, background: "#c2410c", color: "#fff", opacity: saving ? 0.6 : 1 }}
-                onClick={applyBulk}
-                disabled={saving}
-              >
-                {saving ? "Aplicando…" : `APLICAR A ${selected.size} UBICACIONES →`}
-              </button>
-              <button style={s.modalBtnCancel} onClick={() => setShowBulk(false)}>Cancelar</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Nueva Zona */}
-      {showNuevaZona && (
-        <div style={s.overlay} onClick={() => setShowNuevaZona(false)}>
-          <div style={{ ...s.modalBox, maxWidth: 560 }} onClick={e => e.stopPropagation()}>
-            <div style={{ ...s.modalTitle, color: "#0ea5e9" }}>+ AGREGAR ZONA A LA BASE DE DATOS</div>
-            <p style={{ fontSize: 11, color: "#64748b", margin: "0 0 18px" }}>
-              Genera localizadores automáticamente con el patrón <code style={{ color: "#f97316" }}>ZONA.POS.FILA.COL</code>
-            </p>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px" }}>
-              <div>
-                <label style={s.fieldLabel}>NOMBRE DE ZONA *</label>
-                <input style={s.fieldInput} placeholder="Ej: ZONA16" value={nzZona}
-                  onChange={e => setNzZona(e.target.value.toUpperCase())} />
-              </div>
-              <div>
-                <label style={s.fieldLabel}>FORMATO / TIPO</label>
-                <input style={s.fieldInput} placeholder="Mezcla" value={nzFormato}
-                  onChange={e => setNzFormato(e.target.value)} />
-              </div>
-              <div>
-                <label style={s.fieldLabel}>POSICIÓN DESDE</label>
-                <input style={s.fieldInput} type="number" min={1} value={nzDesde}
-                  onChange={e => setNzDesde(Number(e.target.value))} />
-              </div>
-              <div>
-                <label style={s.fieldLabel}>POSICIÓN HASTA</label>
-                <input style={s.fieldInput} type="number" min={1} value={nzHasta}
-                  onChange={e => setNzHasta(Number(e.target.value))} />
-              </div>
-              <div>
-                <label style={s.fieldLabel}>FILAS POR POSICIÓN</label>
-                <input style={s.fieldInput} type="number" min={1} value={nzFilas}
-                  onChange={e => setNzFilas(Number(e.target.value))} />
-              </div>
-              <div>
-                <label style={s.fieldLabel}>COLUMNAS POR FILA</label>
-                <input style={s.fieldInput} type="number" min={1} value={nzCols}
-                  onChange={e => setNzCols(Number(e.target.value))} />
-              </div>
-              <div>
-                <label style={s.fieldLabel}>CAPACIDAD (pallets)</label>
-                <input style={s.fieldInput} type="number" min={1} value={nzCapacidad}
-                  onChange={e => setNzCapacidad(Number(e.target.value))} />
-              </div>
-              <div style={{ display: "flex", alignItems: "flex-end" }}>
-                <button style={{ ...s.modalBtn, background: "#1e3a5f", color: "#60a5fa", border: "1px solid rgba(96,165,250,0.3)", fontSize: 10 }}
-                  onClick={actualizarPreview}>
-                  👁 PREVISUALIZAR
-                </button>
-              </div>
-            </div>
-
-            {/* Preview */}
-            {nzPreview.length > 0 && (
-              <div style={{ marginTop: 14, background: "#f8fafc", border: "1px solid rgba(14,165,233,0.2)", borderRadius: 3, padding: "10px 14px" }}>
-                <div style={{ fontSize: 9, letterSpacing: 2, color: "#0ea5e9", marginBottom: 8 }}>
-                  PREVISUALIZACIÓN — {generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols).length} LOCALIZADORES
-                  {generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols).length > 30 && " (mostrando primeros 30)"}
-                </div>
-                <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 5 }}>
-                  {nzPreview.map(loc => (
-                    <span key={loc} style={{ background: "#1e3a5f", color: "#93c5fd", fontSize: 10, padding: "2px 7px", borderRadius: 2, fontFamily: "monospace" }}>
-                      {loc}
-                    </span>
-                  ))}
-                </div>
-              </div>
+                </tbody>
+              </table>
             )}
-
-            <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-              <button
-                style={{ ...s.modalBtn, background: "#0c4a6e", color: "#fff", opacity: savingZona ? 0.6 : 1 }}
-                onClick={crearZona}
-                disabled={savingZona || !nzZona.trim()}
-              >
-                {savingZona ? "Creando…" : `CREAR ${generarLocalizadores(nzZona, nzDesde, nzHasta, nzFilas, nzCols).length} LOCALIZADORES →`}
-              </button>
-              <button style={s.modalBtnCancel} onClick={() => setShowNuevaZona(false)}>Cancelar</button>
-            </div>
           </div>
+          <p style={s.footer}>{locs.length} registros · ● cambios sin guardar · disponible y % se calculan automáticamente</p>
+        </div>
+      )}
+
+      {/* ══ LINEAS REUBICACIÓN ══════════════════════════════════════════════════ */}
+      {tab === "lineas" && (
+        <div>
+          {/* Controls */}
+          <div style={s.controls}>
+            <select style={s.sel} value={estadoFilter} onChange={e => setEstadoFilter(e.target.value)}>
+              <option value="ALL">Todos los estados</option>
+              {["pendiente","aprobada","rechazada","en_proceso","completada"].map(e => (
+                <option key={e} value={e}>{e}</option>
+              ))}
+            </select>
+
+            <button style={s.btnOrange} onClick={addLineaRow}>+ AGREGAR FILA</button>
+
+            <button
+              style={{ ...s.btnOrange, opacity: dirtyLineas ? 1 : 0.4 }}
+              onClick={saveLineas}
+              disabled={savingLineas}
+            >
+              {savingLineas ? "Guardando…" : `GUARDAR CAMBIOS${dirtyLineas ? ` (${dirtyLineas})` : ""}`}
+            </button>
+
+            <button style={s.btnGray} onClick={() => setShowRangeLineas(v => !v)}>
+              {showRangeLineas ? "▲" : "▼"} RANGO
+            </button>
+
+            <button style={s.btnGray} disabled={uploadingLineas}
+              onClick={() => fileRefLineas.current?.click()}>
+              {uploadingLineas ? "Subiendo…" : "SUBIR PRODUCCIÓN"}
+            </button>
+            <input ref={fileRefLineas} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+              onChange={e => { const f = e.target.files?.[0]; if (f) { handleLineasFile(f); e.target.value = ""; } }} />
+          </div>
+
+          {/* Range panel – Lineas */}
+          {showRangeLineas && (
+            <div style={s.panel}>
+              <div style={s.panelTitle}>ACTUALIZAR POR RANGO</div>
+              <div style={s.rangeRow}>
+                <label style={s.rangeLabel}>Filas</label>
+                <input style={{ ...s.inp, width: 64 }} type="number" min="1"
+                  value={rangeFromLineas} onChange={e => setRangeFromLineas(e.target.value)} placeholder="desde" />
+                <span style={s.rangeLabel}>—</span>
+                <input style={{ ...s.inp, width: 64 }} type="number" min="1"
+                  value={rangeToLineas} onChange={e => setRangeToLineas(e.target.value)} placeholder="hasta" />
+
+                <label style={s.rangeLabel}>Campo</label>
+                <select style={s.sel} value={rangeFieldLineas} onChange={e => setRangeFieldLineas(e.target.value)}>
+                  <option value="responsable">Responsable</option>
+                  <option value="subinventario_destino">Subinv. Destino</option>
+                  <option value="localizador_destino">Loc. Destino</option>
+                  <option value="lote">Lote</option>
+                  <option value="notas">Notas</option>
+                  <option value="pallets">Pallets</option>
+                  <option value="cajas">Cajas</option>
+                </select>
+
+                <label style={s.rangeLabel}>Valor</label>
+                <input style={s.inp} value={rangeValueLineas}
+                  onChange={e => setRangeValueLineas(e.target.value)} placeholder="nuevo valor" />
+
+                <button style={s.btnOrange} onClick={applyRangeLineas}>APLICAR</button>
+              </div>
+              <p style={s.hint}>
+                Los cambios se marcan en naranja · presiona GUARDAR CAMBIOS para confirmar en BD
+              </p>
+            </div>
+          )}
+
+          {/* Table – wide, scrollable */}
+          <div style={{ ...s.tableWrap, overflowX: "auto" }}>
+            {loadingLineas ? (
+              <div style={s.loading}>Cargando líneas…</div>
+            ) : (
+              <table style={{ ...s.table, minWidth: 1500 }}>
+                <thead>
+                  <tr>
+                    {["#","ORDEN","COD ORG","CÓDIGO","DESCRIPCIÓN","SUBINV ORI","LOC ORI","LOTE",
+                      "CANT FÍS","PALLETS","CAJAS","SUBINV DEST","LOC DEST","RESPONSABLE",
+                      "INV-PE","NOTAS","ESTADO",""].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {lineas.map((r, i) => (
+                    <tr key={r.id} style={{
+                      background: r._dirty
+                        ? "rgba(249,115,22,0.07)"
+                        : i % 2 === 0 ? "#0d1117" : "#080c14",
+                    }}>
+                      <td style={{ ...s.td, color: "#4a5568" }}>{i + 1}</td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 80 }}
+                        value={S(r.numero_orden)}
+                        onChange={e => editLinea(r.id, "numero_orden", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 78 }}
+                        value={S(r.cod_org_inv)}
+                        onChange={e => editLinea(r.id, "cod_org_inv", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 78 }}
+                        value={S(r.codigo)}
+                        onChange={e => editLinea(r.id, "codigo", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 160 }}
+                        value={r.descripcion}
+                        onChange={e => editLinea(r.id, "descripcion", e.target.value)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 100 }}
+                        value={S(r.subinventario_origen)}
+                        onChange={e => editLinea(r.id, "subinventario_origen", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 78 }}
+                        value={S(r.localizador_origen)}
+                        onChange={e => editLinea(r.id, "localizador_origen", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 78 }}
+                        value={S(r.lote)}
+                        onChange={e => editLinea(r.id, "lote", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 66 }} type="number"
+                        value={r.cantidad_fisica}
+                        onChange={e => editLinea(r.id, "cantidad_fisica", N(e.target.value))} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 58 }} type="number"
+                        value={r.pallets}
+                        onChange={e => editLinea(r.id, "pallets", N(e.target.value))} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 58 }} type="number"
+                        value={r.cajas}
+                        onChange={e => editLinea(r.id, "cajas", N(e.target.value))} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 100 }}
+                        value={S(r.subinventario_destino)}
+                        onChange={e => editLinea(r.id, "subinventario_destino", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 78 }}
+                        value={S(r.localizador_destino)}
+                        onChange={e => editLinea(r.id, "localizador_destino", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 100 }}
+                        value={S(r.responsable)}
+                        onChange={e => editLinea(r.id, "responsable", e.target.value || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 56 }} type="number"
+                        value={S(r.inv_pe)}
+                        onChange={e => editLinea(r.id, "inv_pe", N(e.target.value) || null)} /></td>
+                      <td style={s.td}><input style={{ ...s.cellInp, width: 120 }}
+                        value={S(r.notas)}
+                        onChange={e => editLinea(r.id, "notas", e.target.value || null)} /></td>
+                      <td style={s.td}>
+                        <span style={{ ...s.estadoBadge, ...getEstadoStyle(r.estado) }}>{r.estado}</span>
+                      </td>
+                      <td style={{ ...s.td, width: 16 }}>
+                        {r._dirty && <span style={{ color: "#f97316", fontSize: 10 }}>●</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <p style={s.footer}>{lineas.length} registros · ● cambios sin guardar · estado sigue el flujo de aprobación</p>
+        </div>
+      )}
+
+      {/* ══ CATÁLOGO PRODUCTOS ══════════════════════════════════════════════════ */}
+      {tab === "catalogo" && (
+        <div>
+          {/* Controls */}
+          <div style={s.controls}>
+            <select style={s.sel} value={catFilter}
+              onChange={e => setCatFilter(e.target.value as "all" | "empty")}>
+              <option value="all">Todos los productos</option>
+              <option value="empty">⚠ Con campos vacíos</option>
+            </select>
+
+            <button style={s.btnGray} onClick={autoDetectFormatos}>
+              ⚡ AUTO-DETECTAR FORMATOS
+            </button>
+
+            <button
+              style={{ ...s.btnOrange, opacity: dirtyCatalog ? 1 : 0.4 }}
+              onClick={saveCatalog}
+              disabled={savingCatalog}
+            >
+              {savingCatalog ? "Guardando…" : `GUARDAR CAMBIOS${dirtyCatalog ? ` (${dirtyCatalog})` : ""}`}
+            </button>
+
+            <button style={s.btnGray} onClick={loadCatalog} disabled={loadingCatalog}>
+              ↻ RECARGAR
+            </button>
+
+            <span style={{ fontSize: 11, color: "#4a5568", marginLeft: 8 }}>
+              {catalog.filter(r => r._emptyFields.length > 0).length} con campos vacíos ·{" "}
+              {catalog.filter(r => r._new).length} nuevos (solo en lineas)
+            </span>
+          </div>
+
+          {/* Legend */}
+          <div style={s.catLegend}>
+            <span style={s.legendNew}>◆ NUEVO</span>
+            <span style={s.legendWarn}>⚠ CAMPO VACÍO</span>
+            <span style={{ fontSize: 10, color: "#4a5568" }}>
+              Haz clic en ⚠ para rellenar el formato sugerido desde la descripción
+            </span>
+          </div>
+
+          {/* Table */}
+          <div style={{ ...s.tableWrap, overflowX: "auto" }}>
+            {loadingCatalog ? (
+              <div style={s.loading}>Cargando catálogo…</div>
+            ) : (
+              <table style={{ ...s.table, minWidth: 1100 }}>
+                <thead>
+                  <tr>
+                    {["#","ESTADO","CÓDIGO","DESCRIPCIÓN","FORMATO","CJ/PISO","CJ/PALLET","UNIDAD","M²/CAJA","M²/PE",""].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleCatalog.map((r, i) => (
+                    <tr key={r.codigo} style={{
+                      background: r._dirty
+                        ? "rgba(249,115,22,0.07)"
+                        : i % 2 === 0 ? "#0d1117" : "#080c14",
+                    }}>
+                      <td style={{ ...s.td, color: "#4a5568", width: 36 }}>{i + 1}</td>
+
+                      {/* Estado badge */}
+                      <td style={{ ...s.td, width: 72 }}>
+                        {r._new ? (
+                          <span style={s.catBadgeNew}>NUEVO</span>
+                        ) : r._emptyFields.length > 0 ? (
+                          <span style={s.catBadgeWarn}>
+                            ⚠ {r._emptyFields.length}
+                          </span>
+                        ) : (
+                          <span style={s.catBadgeOk}>✓</span>
+                        )}
+                      </td>
+
+                      <td style={s.td}>
+                        <span style={{ color: "#f97316", fontSize: 11, whiteSpace: "nowrap" }}>{r.codigo}</span>
+                      </td>
+
+                      <td style={s.td}>
+                        <span style={{ color: "#e2e8f0", fontSize: 11 }}>{r.descripcion}</span>
+                      </td>
+
+                      {/* Formato – editable, con sugerencia */}
+                      <td style={s.td}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <input
+                            style={{ ...s.cellInp, width: 90,
+                              borderColor: !r.formato ? "rgba(251,191,36,0.5)" : "rgba(249,115,22,0.1)" }}
+                            value={r.formato ?? ""}
+                            placeholder={r._fmtSugerido || "—"}
+                            onChange={e => editCatalog(r.codigo, "formato", e.target.value || null)}
+                          />
+                          {!r.formato && r._fmtSugerido && (
+                            <button
+                              title={`Usar: ${r._fmtSugerido}`}
+                              style={s.warnBtn}
+                              onClick={() => editCatalog(r.codigo, "formato", r._fmtSugerido)}
+                            >⚠</button>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* Cajas por piso */}
+                      <td style={s.td}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <input
+                            style={{ ...s.cellInp, width: 58,
+                              borderColor: !r.cajas_por_piso ? "rgba(251,191,36,0.5)" : "rgba(249,115,22,0.1)" }}
+                            type="number" min="0"
+                            value={r.cajas_por_piso ?? ""}
+                            placeholder="—"
+                            onChange={e => editCatalog(r.codigo, "cajas_por_piso", N(e.target.value) || null)}
+                          />
+                          {!r.cajas_por_piso && <span style={s.emptyDot}>⚠</span>}
+                        </div>
+                      </td>
+
+                      {/* Cajas por pallet */}
+                      <td style={s.td}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <input
+                            style={{ ...s.cellInp, width: 58,
+                              borderColor: !r.cajas_por_pallet ? "rgba(251,191,36,0.5)" : "rgba(249,115,22,0.1)" }}
+                            type="number" min="0"
+                            value={r.cajas_por_pallet ?? ""}
+                            placeholder="—"
+                            onChange={e => editCatalog(r.codigo, "cajas_por_pallet", N(e.target.value) || null)}
+                          />
+                          {!r.cajas_por_pallet && <span style={s.emptyDot}>⚠</span>}
+                        </div>
+                      </td>
+
+                      {/* Unidad de medida */}
+                      <td style={s.td}>
+                        <input
+                          style={{ ...s.cellInp, width: 60 }}
+                          value={r.unidad_de_medida ?? ""}
+                          placeholder="—"
+                          onChange={e => editCatalog(r.codigo, "unidad_de_medida", e.target.value || null)}
+                        />
+                      </td>
+
+                      {/* M² por caja */}
+                      <td style={s.td}>
+                        <input
+                          style={{ ...s.cellInp, width: 62 }}
+                          type="number" step="0.01" min="0"
+                          value={r.m2_por_caja ?? ""}
+                          placeholder="—"
+                          onChange={e => editCatalog(r.codigo, "m2_por_caja", N(e.target.value) || null)}
+                        />
+                      </td>
+
+                      {/* M² x PE */}
+                      <td style={s.td}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <input
+                            style={{ ...s.cellInp, width: 62,
+                              borderColor: !r.m2_x_pe ? "rgba(251,191,36,0.5)" : "rgba(249,115,22,0.1)" }}
+                            type="number" step="0.01" min="0"
+                            value={r.m2_x_pe ?? ""}
+                            placeholder="—"
+                            onChange={e => editCatalog(r.codigo, "m2_x_pe", N(e.target.value) || null)}
+                          />
+                          {!r.m2_x_pe && <span style={s.emptyDot}>⚠</span>}
+                        </div>
+                      </td>
+
+                      <td style={{ ...s.td, width: 16 }}>
+                        {r._dirty && <span style={{ color: "#f97316", fontSize: 10 }}>●</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <p style={s.footer}>
+            {visibleCatalog.length} / {catalog.length} registros · ⚠ campos críticos vacíos afectan el análisis
+            · ● cambios sin guardar
+          </p>
         </div>
       )}
     </div>
   );
 }
 
+// ── Styles ───────────────────────────────────────────────────────────────────
+
 const s: { [k: string]: React.CSSProperties } = {
-  root: { padding: "28px 24px", fontFamily: "'Courier New', monospace", color: "#1e293b", minHeight: "100vh", background: "#f1f5f9", position: "relative" },
-  flash: { position: "fixed", top: 20, right: 24, background: "#ffffff", border: "1px solid", padding: "10px 20px", borderRadius: 3, fontSize: 12, letterSpacing: 1, zIndex: 9999 },
-  pageHeader: { marginBottom: 20 },
-  badge: { display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316", border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", marginBottom: 10 },
-  title: { margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: "#0f172a", letterSpacing: 1 },
-  sub: { margin: 0, fontSize: 11, color: "#64748b" },
-  catalogBox: { border: "1px solid", borderRadius: 4, padding: "12px 16px", marginBottom: 18, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" as const, transition: "border-color .2s, background .2s" },
-  opSection:  { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 4, padding: "16px 18px", marginBottom: 18 },
-  opFormBox:  { background: "#fff", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 4, padding: "14px 16px", marginBottom: 14 },
-  opCard:     { background: "#fff", border: "1px solid rgba(249,115,22,0.12)", borderRadius: 4, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 },
-  btnBulk: { background: "#1d4ed8", border: "none", color: "#fff", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  btnRefresh: { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#64748b", fontSize: 11, padding: "8px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  statsRow: { display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" as const },
-  statCard: { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3, padding: "10px 18px", flex: 1, minWidth: 100 },
-  statLabel: { fontSize: 9, letterSpacing: 2, color: "#94a3b8", marginTop: 3 },
-  filters: { display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" as const, alignItems: "center" },
-  searchInput: { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#1e293b", fontSize: 11, padding: "7px 10px", fontFamily: "'Courier New', monospace", outline: "none", minWidth: 180 },
-  select: { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#1e293b", fontSize: 11, padding: "7px 10px", fontFamily: "'Courier New', monospace", outline: "none" },
-  loading: { textAlign: "center" as const, color: "#64748b", padding: 40, fontSize: 12 },
-  tableWrap: { overflowX: "auto" as const, border: "1px solid rgba(249,115,22,0.25)", borderRadius: 3 },
+  root: {
+    padding: "32px",
+    fontFamily: "'Courier New', monospace",
+    color: "#e2e8f0",
+    minHeight: "100vh",
+    background: "#0a0e17",
+    position: "relative",
+  },
+  toast: {
+    position: "fixed", top: 20, right: 20, zIndex: 9999,
+    padding: "12px 20px", borderRadius: 4, border: "1px solid",
+    fontSize: 12, letterSpacing: 1, fontFamily: "'Courier New', monospace",
+    maxWidth: 360,
+  },
+  header: { marginBottom: 24 },
+  badge: {
+    display: "inline-block", fontSize: 10, letterSpacing: 3, color: "#f97316",
+    border: "1px solid rgba(249,115,22,0.4)", padding: "4px 10px", marginBottom: 10,
+  },
+  title: { margin: "0 0 6px", fontSize: 26, fontWeight: 700, color: "#fff", letterSpacing: 1 },
+  sub:   { margin: 0, fontSize: 12, color: "#4a5568" },
+
+  tabBar: { display: "flex", borderBottom: "1px solid rgba(249,115,22,0.15)", marginBottom: 20 },
+  tab: {
+    background: "transparent", border: "none", borderBottom: "2px solid transparent",
+    color: "#6b7280", fontSize: 11, letterSpacing: 2, padding: "10px 20px",
+    cursor: "pointer", fontFamily: "'Courier New', monospace",
+    display: "flex", alignItems: "center", gap: 6,
+  },
+  tabActive: { color: "#f97316", borderBottom: "2px solid #f97316" },
+  dirtyBadge: {
+    background: "#f97316", color: "#000", fontSize: 9, borderRadius: "50%",
+    width: 16, height: 16, display: "inline-flex", alignItems: "center",
+    justifyContent: "center", fontWeight: 700,
+  },
+
+  controls: { display: "flex", gap: 10, alignItems: "center", marginBottom: 14, flexWrap: "wrap" as const },
+  sel: {
+    background: "#0d1117", border: "1px solid rgba(249,115,22,0.2)",
+    color: "#e2e8f0", fontSize: 11, padding: "7px 10px",
+    fontFamily: "'Courier New', monospace", borderRadius: 2, cursor: "pointer",
+  },
+  btnOrange: {
+    background: "#f97316", border: "none", color: "#000",
+    fontSize: 11, fontWeight: 700, letterSpacing: 1.5, padding: "8px 16px",
+    cursor: "pointer", fontFamily: "'Courier New', monospace", borderRadius: 2,
+    whiteSpace: "nowrap" as const,
+  },
+  btnGray: {
+    background: "transparent", border: "1px solid rgba(249,115,22,0.2)",
+    color: "#6b7280", fontSize: 11, letterSpacing: 1.5, padding: "8px 14px",
+    cursor: "pointer", fontFamily: "'Courier New', monospace", borderRadius: 2,
+  },
+
+  panel: {
+    background: "#0d1117", border: "1px solid rgba(249,115,22,0.15)",
+    borderRadius: 4, padding: "16px 20px", marginBottom: 14,
+  },
+  panelTitle: { fontSize: 10, letterSpacing: 3, color: "#f97316", marginBottom: 12 },
+  rangeRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" as const },
+  rangeLabel: { fontSize: 11, color: "#6b7280", letterSpacing: 0.5 },
+  inp: {
+    background: "#080c14", border: "1px solid rgba(249,115,22,0.2)",
+    color: "#e2e8f0", fontSize: 11, padding: "6px 9px",
+    fontFamily: "'Courier New', monospace", borderRadius: 2, width: 120,
+  },
+  hint: { fontSize: 10, color: "#4a5568", margin: "10px 0 0", letterSpacing: 0.3 },
+
+  diffBox: {
+    background: "#080c14", border: "1px solid rgba(249,115,22,0.1)",
+    borderRadius: 3, padding: "14px 18px",
+  },
+  diffStats: { display: "flex", gap: 28, fontSize: 13, fontWeight: 700 },
+
+  tableWrap: {
+    overflowY: "auto", maxHeight: "62vh",
+    border: "1px solid rgba(249,115,22,0.1)", borderRadius: 4,
+  },
+  loading: { padding: 40, textAlign: "center" as const, color: "#4a5568", fontSize: 12 },
   table: { width: "100%", borderCollapse: "collapse" as const, fontSize: 11 },
-  thead: { borderBottom: "1px solid rgba(249,115,22,0.15)", background: "#f8fafc" },
-  th: { padding: "7px 10px", textAlign: "left" as const, fontSize: 9, letterSpacing: 1.5, color: "#94a3b8", fontWeight: 700, whiteSpace: "nowrap" as const, userSelect: "none" as const },
-  tr: { borderBottom: "1px solid rgba(249,115,22,0.04)" },
-  td: { padding: "7px 10px", verticalAlign: "middle" as const, whiteSpace: "nowrap" as const },
-  inlineInput: { background: "#f1f5f9", border: "1px solid rgba(249,115,22,0.4)", borderRadius: 2, color: "#1e293b", fontSize: 11, padding: "4px 7px", fontFamily: "'Courier New', monospace", outline: "none", width: 120 },
-  btnSave: { background: "transparent", border: "1px solid rgba(74,222,128,0.4)", color: "#4ade80", fontSize: 11, padding: "4px 8px", cursor: "pointer", borderRadius: 2 },
-  btnCancel: { background: "transparent", border: "1px solid rgba(248,113,113,0.4)", color: "#f87171", fontSize: 11, padding: "4px 8px", cursor: "pointer", borderRadius: 2 },
-  actionBtn: { background: "transparent", border: "1px solid", fontSize: 10, padding: "4px 8px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace", letterSpacing: 0.5 },
-  empty: { textAlign: "center" as const, color: "#94a3b8", padding: 40, fontSize: 12 },
-  overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 },
-  modalBox: { background: "#f8fafc", border: "1px solid rgba(249,115,22,0.3)", borderRadius: 4, padding: "24px 28px", width: "100%", maxWidth: 480 },
-  modalTitle: { fontSize: 13, fontWeight: 700, letterSpacing: 2, marginBottom: 14, color: "#f97316" },
-  fieldLabel: { fontSize: 9, letterSpacing: 2, color: "#f97316", display: "block" as const, marginBottom: 6, fontWeight: 600 },
-  fieldInput: { background: "#f1f5f9", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#1e293b", fontSize: 11, padding: "7px 9px", fontFamily: "'Courier New', monospace", width: "100%", boxSizing: "border-box" as const, outline: "none" },
-  toggleOpt: { border: "1px solid rgba(249,115,22,0.3)", fontSize: 10, letterSpacing: 1, padding: "5px 10px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  modalBtn: { border: "none", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "10px 16px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
-  modalBtnCancel: { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#6b7280", fontSize: 10, letterSpacing: 1, padding: "10px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
+  th: {
+    background: "#080c14", color: "#f97316", fontSize: 9, letterSpacing: 2,
+    padding: "10px 10px", textAlign: "left" as const,
+    position: "sticky" as const, top: 0,
+    whiteSpace: "nowrap" as const, borderBottom: "1px solid rgba(249,115,22,0.2)",
+    zIndex: 1,
+  },
+  td: {
+    padding: "3px 7px", borderBottom: "1px solid rgba(255,255,255,0.03)",
+    verticalAlign: "middle" as const,
+  },
+  cellInp: {
+    background: "#080c14", border: "1px solid rgba(249,115,22,0.1)",
+    color: "#e2e8f0", fontSize: 11, padding: "3px 6px",
+    fontFamily: "'Courier New', monospace", borderRadius: 2,
+  },
+  cellSel: {
+    background: "#080c14", border: "1px solid rgba(249,115,22,0.1)",
+    color: "#e2e8f0", fontSize: 11, padding: "2px 4px",
+    fontFamily: "'Courier New', monospace", borderRadius: 2,
+  },
+  estadoBadge: { padding: "2px 8px", borderRadius: 3, fontSize: 10, letterSpacing: 0.5 },
+  footer: { fontSize: 11, color: "#4a5568", marginTop: 8 },
+
+  catLegend: {
+    display: "flex", gap: 20, alignItems: "center",
+    fontSize: 10, marginBottom: 10, padding: "6px 0",
+    borderBottom: "1px solid rgba(249,115,22,0.08)",
+  },
+  legendNew:  { color: "#60a5fa", letterSpacing: 1 },
+  legendWarn: { color: "#fbbf24", letterSpacing: 1 },
+  catBadgeNew: {
+    background: "#1e3a5f", color: "#60a5fa",
+    padding: "2px 7px", borderRadius: 3, fontSize: 9, letterSpacing: 1,
+  },
+  catBadgeWarn: {
+    background: "#422006", color: "#fbbf24",
+    padding: "2px 7px", borderRadius: 3, fontSize: 9, letterSpacing: 1,
+  },
+  catBadgeOk: {
+    color: "#4ade80", fontSize: 12, paddingLeft: 6,
+  },
+  warnBtn: {
+    background: "rgba(251,191,36,0.15)", border: "1px solid rgba(251,191,36,0.4)",
+    color: "#fbbf24", fontSize: 10, padding: "2px 5px", cursor: "pointer",
+    borderRadius: 2, fontFamily: "'Courier New', monospace",
+  },
+  emptyDot: {
+    color: "rgba(251,191,36,0.4)", fontSize: 10,
+  },
 };
