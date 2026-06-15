@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useRef, useCallback } from "react"; import * as XLSX from "xlsx";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react"; import * as XLSX from "xlsx";
 import { getBrowserClient } from "@/lib/supabase/browser";
 const db = getBrowserClient();
 // ── Tipos ──────────────────────────────────────────────────────────────────
@@ -65,8 +65,21 @@ useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.
 // ── Filtros ─────────────────────────────────────────────────────────────
 function matchFilter(p: number) { if (fStatus === "all") return true; if (fStatus === "empty") return p <= 0; if (fStatus === "low") return p > 0 && p < 0.5; if (fStatus === "mid") return p >= 0.5 && p < 0.8; if (fStatus === "high") return p >= 0.8 && p <= 1.0; if (fStatus === "over") return p > 1.0; return true; }
 // ── Stats globales ──────────────────────────────────────────────────────
-const allLocs = Object.values(allData).flat(); const totalCap = allLocs.reduce((s, d) => s + (d.capacidad || 0), 0); const totalOcup = allLocs.reduce((s, d) => s + (d.ocupado || 0), 0); const avgGlobal = totalCap > 0 ? totalOcup / totalCap : 0; const subInvMap = selectedSubInv !== "all" ? (subInvStock[selectedSubInv] ?? {}) : null; const subInvStats = subInvMap ? (() => { const keys = Object.keys(subInvMap); const total = keys.reduce((s, k) => s + (subInvMap[k] || 0), 0); return { locs: keys.length, total }; })() : null; const totalPalletsLibres = allLocs.reduce((s, d) => s + Math.max(0, d.disponible || 0), 0);
-const stats = [ { v: allLocs.length, l: "Localizadores" }, { v: Object.keys(allData).length, l: "Zonas" }, { v: (avgGlobal * 100).toFixed(1) + "%", l: "Ocupación global" }, { v: allLocs.filter(d => d.ocupado > 0).length, l: "Con stock" }, { v: totalPalletsLibres, l: "Pallets libres" }, { v: allLocs.filter(d => d.pct_ocupacion > 1.0).length, l: "Con exceso" }, ];
+const allLocs = useMemo(() => Object.values(allData).flat(), [allData]);
+const { totalCap, totalOcup, totalPalletsLibres, conStock, conExceso } = useMemo(() => {
+  let totalCap = 0, totalOcup = 0, totalPalletsLibres = 0, conStock = 0, conExceso = 0;
+  for (const d of allLocs) {
+    totalCap += d.capacidad || 0;
+    totalOcup += d.ocupado || 0;
+    totalPalletsLibres += Math.max(0, d.disponible || 0);
+    if (d.ocupado > 0) conStock++;
+    if (d.pct_ocupacion > 1.0) conExceso++;
+  }
+  return { totalCap, totalOcup, totalPalletsLibres, conStock, conExceso };
+}, [allLocs]);
+const avgGlobal = totalCap > 0 ? totalOcup / totalCap : 0;
+const subInvMap = selectedSubInv !== "all" ? (subInvStock[selectedSubInv] ?? {}) : null; const subInvStats = subInvMap ? (() => { const keys = Object.keys(subInvMap); const total = keys.reduce((s, k) => s + (subInvMap[k] || 0), 0); return { locs: keys.length, total }; })() : null;
+const stats = useMemo(() => [ { v: allLocs.length, l: "Localizadores" }, { v: Object.keys(allData).length, l: "Zonas" }, { v: (avgGlobal * 100).toFixed(1) + "%", l: "Ocupación global" }, { v: conStock, l: "Con stock" }, { v: totalPalletsLibres, l: "Pallets libres" }, { v: conExceso, l: "Con exceso" }, ], [allLocs.length, allData, avgGlobal, conStock, totalPalletsLibres, conExceso]);
 // ── Detectar columnas del Excel ─────────────────────────────────────────
 function detectHeader(rows: unknown[][]): { headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number; cantColIdx: number; subInvColIdx: number; formatoColIdx: number; loteColIdx: number; codigoColIdx: number; } { let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1; let cajasColIdx = -1, cantColIdx = -1, subInvColIdx = -1; let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1;
 for (let i = 0; i < Math.min(30, rows.length); i++) {
@@ -369,16 +382,18 @@ try {
     );
     setProgress(48);
 
-    // ── PASO 5: subir a BD en lotes ──────────────────────────────
-    const BATCH = 200;
+    // ── PASO 5: subir a BD en lotes paralelos ────────────────────
+    const BATCH = 200; const PARALLEL = 5;
     let done = 0;
-    for (let i = 0; i < updates.length; i += BATCH) {
-      const batch = updates.slice(i, i + BATCH);
-      const { error } = await db
-        .from("localizadores")
-        .upsert(batch, { onConflict: "zona,localizador" });
-      if (error) throw new Error(`Lote ${Math.ceil(i / BATCH) + 1}: ${error.message}`);
-      done += batch.length;
+    for (let i = 0; i < updates.length; i += BATCH * PARALLEL) {
+      const group = Array.from({ length: PARALLEL }, (_, j) =>
+        updates.slice(i + j * BATCH, i + (j + 1) * BATCH)
+      ).filter(b => b.length > 0);
+      const results = await Promise.all(
+        group.map(batch => db.from("localizadores").upsert(batch, { onConflict: "zona,localizador" }))
+      );
+      for (const { error } of results) { if (error) throw new Error(error.message); }
+      done += group.reduce((s, b) => s + b.length, 0);
       setProgress(48 + Math.round((done / updates.length) * 40));
       setProgressLabel(`Actualizando BD… ${done}/${updates.length}`);
     }
@@ -402,31 +417,31 @@ try {
     }
 
     setProgress(90);
-    setProgressLabel("Recargando mapa…");
-    await loadMap();
+    setProgressLabel("Recargando mapa y catálogo…");
 
-    // ── PASO 7: Enriquecer formato desde catálogo_productos ───────
+    // ── PASOS 6+7: loadMap y catálogo en paralelo ────────────────
     const allCodigos = [...new Set(subInvItems.map(it => it.codigo).filter((c): c is string => !!c))];
-    if (allCodigos.length > 0) {
-      const { data: catData } = await db
-        .from("catalogo_productos")
-        .select("codigo,formato,cajas_por_pallet")
-        .in("codigo", allCodigos);
-      if (catData && catData.length > 0) {
-        type CatEntry = { codigo: string; formato: string; cajas_por_pallet: number };
-        const catMap: Record<string, CatEntry> = {};
-        for (const c of catData as CatEntry[]) catMap[c.codigo] = c;
-        let enriched = 0;
-        for (const item of subInvItems) {
-          const cat = item.codigo ? catMap[item.codigo] : undefined;
-          if (!cat) continue;
-          if (!item.formato && cat.formato) { item.formato = cat.formato; enriched++; }
-        }
-        log(enriched > 0
-          ? `✓ Catálogo: ${enriched} formatos completados desde catalogo_productos`
-          : `✓ Catálogo: ${catData.length} productos consultados (formatos ya presentes en Excel)`
-        );
+    const [, catResult] = await Promise.all([
+      loadMap(),
+      allCodigos.length > 0
+        ? db.from("catalogo_productos").select("codigo,formato,cajas_por_pallet").in("codigo", allCodigos)
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+    const catData = catResult?.data;
+    if (catData && catData.length > 0) {
+      type CatEntry = { codigo: string; formato: string; cajas_por_pallet: number };
+      const catMap: Record<string, CatEntry> = {};
+      for (const c of catData as CatEntry[]) catMap[c.codigo] = c;
+      let enriched = 0;
+      for (const item of subInvItems) {
+        const cat = item.codigo ? catMap[item.codigo] : undefined;
+        if (!cat) continue;
+        if (!item.formato && cat.formato) { item.formato = cat.formato; enriched++; }
       }
+      log(enriched > 0
+        ? `✓ Catálogo: ${enriched} formatos completados desde catalogo_productos`
+        : `✓ Catálogo: ${catData.length} productos consultados (formatos ya presentes en Excel)`
+      );
     }
 
     // ── PASO 8: Construir mapa por zona para selector ────────────
@@ -607,25 +622,36 @@ async function handlePlanDiario(
   }
 }
 // ── Datos para render ──────────────────────────────────────────────────
-const zonasRender = fZone === "all" ? Object.keys(allData) : [fZone].filter(z => allData[z]);
-const allLocsFlat = allLocs .filter(d => matchFilter(d.pct_ocupacion) && (fZone === "all" || d.zona === fZone) && (!fSearch || d.localizador.toUpperCase().includes(fSearch.toUpperCase())) ) .sort((a, b) => a.zona.localeCompare(b.zona) || a.localizador.localeCompare(b.localizador));
-const leyenda = selectedSubInv === "all" ? [ { c: C.empty, l: "Vacío" }, { c: C.low, l: "<50%" }, { c: C.mid, l: "50–80%" }, { c: C.high, l: "81–99%" }, { c: C.full, l: "100%" }, { c: C.over, l: ">110%" }, ] : [ { c: S.available, l: "Libre (disponible)" }, { c: S.hasSubInv, l: `Tiene ${selectedSubInv}` }, { c: S.otherOcup, l: "Ocupado por otros" }, { c: S.full, l: "Exceso" }, ];
+const zonasRender = useMemo(
+  () => fZone === "all" ? Object.keys(allData) : [fZone].filter(z => allData[z]),
+  [fZone, allData]
+);
+const allLocsFlat = useMemo(() => {
+  const fst = fStatus;
+  return allLocs
+    .filter(d => {
+      const p = d.pct_ocupacion;
+      const ok = fst === "all" || (fst === "empty" && p <= 0) || (fst === "low" && p > 0 && p < 0.5) || (fst === "mid" && p >= 0.5 && p < 0.8) || (fst === "high" && p >= 0.8 && p <= 1.0) || (fst === "over" && p > 1.0);
+      return ok && (fZone === "all" || d.zona === fZone) && (!fSearch || d.localizador.toUpperCase().includes(fSearch.toUpperCase()));
+    })
+    .sort((a, b) => a.zona.localeCompare(b.zona) || a.localizador.localeCompare(b.localizador));
+}, [allLocs, fZone, fStatus, fSearch]);
+const leyenda = useMemo(() => selectedSubInv === "all" ? [ { c: C.empty, l: "Vacío" }, { c: C.low, l: "<50%" }, { c: C.mid, l: "50–80%" }, { c: C.high, l: "81–99%" }, { c: C.full, l: "100%" }, { c: C.over, l: ">110%" }, ] : [ { c: S.available, l: "Libre (disponible)" }, { c: S.hasSubInv, l: `Tiene ${selectedSubInv}` }, { c: S.otherOcup, l: "Ocupado por otros" }, { c: S.full, l: "Exceso" }, ], [selectedSubInv]);
 // Plan filtrado
-const planFiltrado = planFilter
-  ? sortingPlan.filter(p =>
-      p.formato.includes(planFilter.toUpperCase()) ||
-      p.lote.includes(planFilter.toUpperCase()) ||
-      p.asignaciones.some(a =>
-        a.loc.includes(planFilter.toUpperCase()) || a.zona.includes(planFilter.toUpperCase())
-      )
-    )
-  : sortingPlan;
+const planFiltrado = useMemo(() => {
+  if (!planFilter) return sortingPlan;
+  const q = planFilter.toUpperCase();
+  return sortingPlan.filter(p =>
+    p.formato.includes(q) || p.lote.includes(q) ||
+    p.asignaciones.some(a => a.loc.includes(q) || a.zona.includes(q))
+  );
+}, [sortingPlan, planFilter]);
 // Agrupar plan por formato
-const planByFormato: Record<string, PlanEntry[]> = {};
-for (const e of planFiltrado) {
-  if (!planByFormato[e.formato]) planByFormato[e.formato] = [];
-  planByFormato[e.formato].push(e);
-}
+const planByFormato = useMemo(() => {
+  const m: Record<string, PlanEntry[]> = {};
+  for (const e of planFiltrado) { if (!m[e.formato]) m[e.formato] = []; m[e.formato].push(e); }
+  return m;
+}, [planFiltrado]);
 // ── Render ─────────────────────────────────────────────────────────────
 return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
   {/* HEADER */}

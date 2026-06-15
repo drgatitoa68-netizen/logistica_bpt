@@ -121,52 +121,66 @@ def _score_destino(
     item_formato: str,
     pallets_needed: int,
 ) -> int:
-    """
-    Calcula la puntuación de una ubicación como destino para un ítem.
-    Mayor puntuación = mejor opción.
-    """
     lf = _norm(loc_formato)
     itf = _norm(item_formato)
 
     score = 0
-    # R1: Mismo formato exacto → máxima prioridad
     if lf == itf and lf not in _FORMATOS_LIBRES:
         score += 2000
-    # R2: Formato libre (MEZCLA) → segunda opción
     elif lf in _FORMATOS_LIBRES:
         score += 500
-    # R3: Minimizar desperdicio de espacio
     waste = loc_available - pallets_needed
     if waste >= 0:
-        score += max(0, 800 - waste * 2)  # menos desperdicio = más score
-    # R4: Penalizar si hay demasiado espacio libre (dejar espacio para otros)
+        score += max(0, 800 - waste * 2)
     if loc_available > pallets_needed * 3:
         score -= 100
 
     return score
 
 
+def _build_format_index(
+    pool: dict[str, dict],
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Índice formato → claves del pool para búsqueda rápida de destinos compatibles."""
+    fmt_index: dict[str, list[str]] = defaultdict(list)
+    free_keys: list[str] = []
+    for key, loc in pool.items():
+        fmt = loc["formato"]
+        if fmt in _FORMATOS_LIBRES:
+            free_keys.append(key)
+        else:
+            fmt_index[fmt].append(key)
+    return fmt_index, free_keys
+
+
 def _find_best_target(
-    pool: dict[str, dict],  # localizador_upper → {zona, localizador, formato, available}
+    pool: dict[str, dict],
+    fmt_index: dict[str, list[str]],
+    free_keys: list[str],
     item_formato: str,
     pallets_needed: int,
     exclude_locs: set[str],
 ) -> Optional[dict]:
     """
     Cerebro: encuentra la mejor ubicación destino respetando formato y espacio.
-    Retorna el dict del pool o None si no hay ninguna.
+    Usa índice pre-computado para evitar escanear el pool completo.
     """
+    itf = _norm(item_formato)
+    # Empty item format → compatible with everything; else exact + free-format locs
+    if not itf:
+        candidate_keys: object = pool.keys()
+    else:
+        candidate_keys = list(fmt_index.get(itf, [])) + free_keys
+
     best = None
     best_score = -1
 
-    for key, loc in pool.items():
+    for key in candidate_keys:
         if key in exclude_locs:
             continue
-        if loc["available"] < pallets_needed:
+        loc = pool.get(key)
+        if loc is None or loc["available"] < pallets_needed:
             continue
-        if not _formato_compatible(loc["formato"], item_formato):
-            continue
-
         score = _score_destino(loc["available"], loc["formato"], item_formato, pallets_needed)
         if score > best_score:
             best_score = score
@@ -191,7 +205,6 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
 
     # ── SETUP ────────────────────────────────────────────────────────────────
 
-    # Filtrar ítems válidos
     valid_items = [
         it for it in body.items
         if it.codigo and it.codigo.strip()
@@ -217,52 +230,52 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
             "available": max(0, loc.disponible),
         }
 
+    # Índice de formatos para búsqueda O(1) en _find_best_target
+    fmt_index, free_keys = _build_format_index(pool)
+
     # Inventario por localizador: loc_key → {cod_lot_key → {pallets, items}}
-    loc_inventory: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(lambda: {"pallets": 0, "items": []}))
+    loc_inventory: dict[str, dict[str, dict]] = defaultdict(
+        lambda: defaultdict(lambda: {"pallets": 0, "items": []})
+    )
+
+    # Índice global: cod_lot_key → {loc_key → total_pallets}
+    global_index: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    # Muestra por código+lote para O(1) lookup del formato (evita next(...) lineal)
+    sample_by_cod_lot: dict[str, ItemIn] = {}
 
     for it in valid_items:
         loc_key = _norm(it.loc)
         cod_lot_key = f"{it.codigo.strip()}|||{it.lote.strip()}"
         loc_inventory[loc_key][cod_lot_key]["pallets"] += it.pallets
         loc_inventory[loc_key][cod_lot_key]["items"].append(it)
-
-    # Índice global: cod_lot_key → {loc_key → total_pallets}
-    # Permite encontrar todas las ubicaciones de un mismo artículo+lote
-    global_index: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-
-    for it in valid_items:
-        key = f"{it.codigo.strip()}|||{it.lote.strip()}"
-        loc_key = _norm(it.loc)
-        global_index[key][loc_key] += it.pallets
+        global_index[cod_lot_key][loc_key] += it.pallets
+        if cod_lot_key not in sample_by_cod_lot:
+            sample_by_cod_lot[cod_lot_key] = it
 
     movimientos: list[Movimiento] = []
     sin_espacio: list[SinEspacio] = []
     paso = 0
 
     # ── FASE 1: LIBERAR ──────────────────────────────────────────────────────
-    # Para cada ubicación con más de un código diferente:
-    #   - Identificar el código dominante (ancla)
-    #   - Mover el resto a otras ubicaciones del mismo formato
 
-    # Ordenar por nivel de mezcla (más mezclado primero)
-    locs_mezclados = [
-        (lk, inv)
-        for lk, inv in loc_inventory.items()
-        if len({k.split("|||")[0] for k in inv}) > 1  # más de 1 código diferente
-    ]
-    locs_mezclados.sort(key=lambda x: len({k.split("|||")[0] for k in x[1]}), reverse=True)
+    # Pre-computar número de códigos únicos para sort O(n log n) sin recalcular
+    locs_mezclados: list[tuple[str, dict, int]] = []
+    for lk, inv in loc_inventory.items():
+        n_codes = len({k.split("|||")[0] for k in inv})
+        if n_codes > 1:
+            locs_mezclados.append((lk, inv, n_codes))
+    locs_mezclados.sort(key=lambda x: x[2], reverse=True)
 
-    for loc_key, inv in locs_mezclados:
+    for loc_key, inv, _ in locs_mezclados:
         loc_info = loc_info_map.get(loc_key)
         if not loc_info:
             continue
 
-        # Encontrar ANCLA: el código+lote con más pallets
         ancla_key = max(inv.keys(), key=lambda k: inv[k]["pallets"])
         ancla_codigo = ancla_key.split("|||")[0]
         ancla_pallets = inv[ancla_key]["pallets"]
 
-        # Mover todos los NO-ANCLA
         for cod_lot_key, data in inv.items():
             if cod_lot_key == ancla_key:
                 continue
@@ -272,7 +285,7 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
             item_fmt = data["items"][0].formato if data["items"] else ""
             exclude = {loc_key}
 
-            target = _find_best_target(pool, item_fmt, pallets, exclude)
+            target = _find_best_target(pool, fmt_index, free_keys, item_fmt, pallets, exclude)
 
             if target:
                 paso += 1
@@ -294,29 +307,32 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
                     ),
                 ))
                 target["available"] -= pallets
-                # La fuente libera espacio (para recibir consolidaciones en fase 2)
                 if loc_key in pool:
                     pool[loc_key]["available"] += pallets
 
             else:
-                # Intentar mover en fracciones si no cabe en una sola ubicación
+                # Mover en fracciones usando índice de formato para candidatos parciales
+                itf_partial = _norm(item_fmt)
+                if not itf_partial:
+                    partial_cands = list(pool.keys())
+                else:
+                    partial_cands = list(fmt_index.get(itf_partial, [])) + free_keys
+
                 remaining = pallets
                 exclude_partial = {loc_key}
                 moved = 0
 
                 while remaining > 0:
-                    # Buscar cualquier lugar con al menos 1 pallet disponible
                     best_partial = None
-                    best_partial_score = -1
-                    for pk, ploc in pool.items():
+                    best_partial_avail = 0
+                    for pk in partial_cands:
                         if pk in exclude_partial:
                             continue
-                        if ploc["available"] <= 0:
+                        ploc = pool.get(pk)
+                        if ploc is None or ploc["available"] <= 0:
                             continue
-                        if not _formato_compatible(ploc["formato"], item_fmt):
-                            continue
-                        if ploc["available"] > best_partial_score:
-                            best_partial_score = ploc["available"]
+                        if ploc["available"] > best_partial_avail:
+                            best_partial_avail = ploc["available"]
                             best_partial = ploc
 
                     if not best_partial:
@@ -362,30 +378,21 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
                     ))
 
     # ── FASE 2: CONSOLIDAR ───────────────────────────────────────────────────
-    # Para cada código+lote en >1 ubicación:
-    #   - Elegir ANCLA: ubicación con más pallets de ese artículo
-    #     (o la seleccionada por el usuario si tiene ese artículo)
-    #   - Mover todos los demás hacia el ancla
 
-    # Ordenar por total de pallets (más volumen = más impacto en organización)
-    to_consolidate = [
-        (k, locs)
+    # Pre-computar suma de pallets para sort O(n log n) sin recalcular en cada comparación
+    to_consolidate: list[tuple[str, dict[str, int], int]] = [
+        (k, locs, sum(locs.values()))
         for k, locs in global_index.items()
         if len(locs) > 1
     ]
-    to_consolidate.sort(
-        key=lambda x: sum(x[1].values()),
-        reverse=True
-    )
+    to_consolidate.sort(key=lambda x: x[2], reverse=True)
 
-    for cod_lot_key, loc_pallets_map in to_consolidate:
+    for cod_lot_key, loc_pallets_map, _ in to_consolidate:
         codigo, lote = cod_lot_key.split("|||", 1)
-        sample = next(
-            (it for it in valid_items if it.codigo == codigo and it.lote == lote), None
-        )
+        # O(1) lookup en lugar de next(...) lineal sobre valid_items
+        sample = sample_by_cod_lot.get(cod_lot_key)
         item_fmt = sample.formato if sample else ""
 
-        # Elegir ANCLA
         anchor_loc_key = ""
         anchor_pallets = 0
 
@@ -404,7 +411,6 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
         if not anchor_state or not anchor_info:
             continue
 
-        # Mover todos los demás hacia el ancla
         for lk, pallets in loc_pallets_map.items():
             if lk == anchor_loc_key:
                 continue
@@ -415,7 +421,6 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
             src_state = pool.get(lk)
 
             if anchor_state["available"] >= pallets:
-                # Todo cabe
                 paso += 1
                 movimientos.append(Movimiento(
                     paso=paso,
@@ -439,7 +444,6 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
                     src_state["available"] += pallets
 
             elif anchor_state["available"] > 0:
-                # Cabe parcialmente
                 take = anchor_state["available"]
                 paso += 1
                 movimientos.append(Movimiento(
@@ -500,7 +504,6 @@ async def consolidacion_extrema(body: ConsolidacionRequest):
     for i, m in enumerate(ordered):
         m.paso = i + 1
 
-    # ── Resumen ───────────────────────────────────────────────────────────────
     locs_liberadas = list({m.loc_origen for m in liberar_mvs})
     lotes_consolidados = len({f"{m.codigo}|||{m.lote}" for m in consolidar_mvs})
     pallets_totales = sum(m.pallets for m in ordered)
@@ -582,16 +585,20 @@ async def evaluacion_diaria(body: EvaluacionDiariaRequest):
     for it in items_con_mapa:
         by_zona[loc_to_zona[_norm(it.loc)]].append(it)
 
-    # Evaluar criticidad por zona
+    # Evaluar criticidad por zona — pase único sobre zona_items
     zonas_criticidad: list[ZonaCriticidad] = []
 
     for zona, zona_items in by_zona.items():
-        # Mezclas: misma ubicación con distintos códigos
         by_loc: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        cl_locs: dict[str, set[str]] = defaultdict(set)
+        cl_pallets: dict[str, int] = defaultdict(int)
+
         for it in zona_items:
             lk = _norm(it.loc)
             clk = f"{it.codigo.strip()}|||{it.lote.strip()}"
             by_loc[lk][clk] += it.pallets
+            cl_locs[clk].add(lk)
+            cl_pallets[clk] += it.pallets
 
         num_locs_mezcladas = 0
         pallets_en_mezcla = 0
@@ -600,14 +607,6 @@ async def evaluacion_diaria(body: EvaluacionDiariaRequest):
             if len(codes) > 1:
                 num_locs_mezcladas += 1
                 pallets_en_mezcla += sum(cl_map.values())
-
-        # Fragmentación: mismo código+lote en >1 ubicación
-        cl_locs: dict[str, set[str]] = defaultdict(set)
-        cl_pallets: dict[str, int] = defaultdict(int)
-        for it in zona_items:
-            clk = f"{it.codigo.strip()}|||{it.lote.strip()}"
-            cl_locs[clk].add(_norm(it.loc))
-            cl_pallets[clk] += it.pallets
 
         num_fragmentados = sum(1 for locs in cl_locs.values() if len(locs) > 1)
         pallets_fragmentados = sum(
@@ -642,7 +641,6 @@ async def evaluacion_diaria(body: EvaluacionDiariaRequest):
     total_mezclas = sum(z.num_locs_mezcladas for z in zonas_criticidad)
     total_fragmentados = sum(z.num_codigos_fragmentados for z in zonas_criticidad)
 
-    # Plan completo sobre todos los ítems con mapa
     plan = await consolidacion_extrema(ConsolidacionRequest(
         items=items_con_mapa,
         locations=body.locations,
