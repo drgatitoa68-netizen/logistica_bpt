@@ -13,6 +13,11 @@ interface AlertaBodega { nivel: string; mensaje: string; detalle?: string; }
 interface ResumenFormato { formato: string; total_pallets: number; m2_estimado?: number; locs_propios: number; locs_ocupados: number; cobertura_pct: number; }
 interface AnalisisData { fragmentacion: FragmentacionItem[]; consolidaciones: Consolidacion[]; alertas: AlertaBodega[]; resumen_formatos: ResumenFormato[]; metricas: Record<string, unknown>; }
 interface TooltipData { d: Localizador; zona: string; x: number; y: number; } interface SelectedLoc { d: Localizador; zona: string; }
+interface Movimiento { paso: number; tipo: "liberar" | "consolidar"; codigo: string; lote: string; pallets: number; formato: string; loc_origen: string; zona_origen: string; loc_destino: string; zona_destino: string; razon: string; }
+interface SinEspacioItem { codigo: string; lote: string; pallets: number; formato: string; loc_origen: string; motivo: string; }
+interface ConsolidacionPlan { movimientos: Movimiento[]; resumen: { total_movimientos: number; locs_liberadas: string[]; locs_liberadas_count: number; lotes_consolidados: number; pallets_movidos: number; fase_liberar: number; fase_consolidar: number; sin_espacio_count: number; }; sin_espacio: SinEspacioItem[]; }
+interface ZonaCriticidad { zona: string; num_locs_mezcladas: number; num_codigos_fragmentados: number; pallets_en_mezcla: number; pallets_fragmentados: number; score_criticidad: number; nivel: "CRITICO" | "ALTO" | "MEDIO" | "OK"; }
+interface PlanDiarioCriticidad { zonas_ordenadas: ZonaCriticidad[]; zonas_sin_mapa: string[]; total_mezclas: number; total_fragmentados: number; }
 type UploadPhase = "idle" | "zoneSelect" | "formatCheck";
 interface FileLocData { loc: string; zona: string; formato: string; pallets: number; }
 interface FormatRow { _id: number; loc: string; zona: string; formato: string; pallets: number; locDest: string; }
@@ -46,6 +51,12 @@ const [fileZones, setFileZones] = useState<string[]>([]);
 const [fileByZone, setFileByZone] = useState<Record<string, FileLocData[]>>({});
 const [fileSubInvItems, setFileSubInvItems] = useState<SubInvItem[]>([]);
 const [selZone, setSelZone] = useState("all");
+const [selLoc, setSelLoc] = useState("all");
+const [consolidacionPlan, setConsolidacionPlan] = useState<ConsolidacionPlan | null>(null);
+const [loadingConsolidacion, setLoadingConsolidacion] = useState(false);
+const [showConsolidacion, setShowConsolidacion] = useState(true);
+const [planDiario, setPlanDiario] = useState<PlanDiarioCriticidad | null>(null);
+const [loadingDiario, setLoadingDiario] = useState(false);
 const [formatRows, setFormatRows] = useState<FormatRow[]>([]);
 // ── Cargar mapa desde BD ────────────────────────────────────────────────
 const loadMap = useCallback(async () => { try { const { data, error } = await db .from("localizadores") .select("zona,localizador,formato,pct_ocupacion,capacidad,ocupado,disponible") .eq("activo", true) .order("zona").order("localizador"); if (error) throw error; const grouped: Record<string, Localizador[]> = {}; (data || []).forEach((r: Localizador) => { if (!grouped[r.zona]) grouped[r.zona] = []; grouped[r.zona].push(r); }); setAllData(grouped); setConnOk(true); setLastUpdate(new Date().toLocaleTimeString("es-EC")); } catch { setConnOk(false); } finally { setLoading(false); } }, []);
@@ -438,6 +449,18 @@ try {
     setFormatRows([]);
     setUploadPhase("zoneSelect");
 
+    // Construir localizadores completos desde datos ya en memoria (sin query extra)
+    const locsParaPlan: Localizador[] = updates.map(u => ({
+      zona: u.zona,
+      localizador: u.localizador,
+      formato: dbMap[u.localizador]?.formato || "",
+      capacidad: dbMap[u.localizador]?.cap || 0,
+      ocupado: u.ocupado,
+      disponible: u.disponible,
+      pct_ocupacion: u.pct_ocupacion,
+    }));
+    void handlePlanDiario(subInvItems, locsParaPlan);
+
     setProgress(100);
     setProgressLabel(`✅ ${withStock} con stock · ${zonesFound.length} zonas`);
     log(`✅ Archivo procesado: ${withStock} con stock, ${zonesFound.length} zonas. Selecciona zona y localizador para continuar.`, "ok");
@@ -454,9 +477,12 @@ try {
 }
 // ── Ir a tabla de formatos/destinos ────────────────────────────────────
 function handleGoToFormat() {
-  const items = selZone === "all"
+  let items = selZone === "all"
     ? Object.values(fileByZone).flat()
     : fileByZone[selZone] || [];
+  if (selLoc !== "all") {
+    items = items.filter(d => d.loc.toUpperCase() === selLoc.toUpperCase());
+  }
   setFormatRows(items.map((d, i) => ({ _id: i, ...d, locDest: "" })));
   setUploadPhase("formatCheck");
 }
@@ -466,12 +492,15 @@ async function handleExecutePlan() {
   setSortingPlan([]);
   setAnalisisData(null);
   try {
-    const items = selZone === "all"
+    let items = selZone === "all"
       ? fileSubInvItems
       : fileSubInvItems.filter(it => {
           const zoneEntry = fileByZone[selZone];
           return zoneEntry ? zoneEntry.some(l => l.loc === it.loc) : false;
         });
+    if (selLoc !== "all") {
+      items = items.filter(it => it.loc.toUpperCase() === selLoc.toUpperCase());
+    }
     const { data: freshLocs } = await db
       .from("localizadores")
       .select("zona,localizador,capacidad,disponible,formato")
@@ -514,6 +543,67 @@ async function handleExecutePlan() {
     // plan error handled silently
   } finally {
     setLoadingPlan(false);
+  }
+}
+// ── Organización Extrema ────────────────────────────────────────────────
+async function handleConsolidacionExtrema() {
+  setLoadingConsolidacion(true);
+  setConsolidacionPlan(null);
+  try {
+    const allLocsDB = Object.values(allData).flat();
+    const resp = await fetch("/api/consolidacion-extrema", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: fileSubInvItems,
+        locations: allLocsDB,
+        targetLoc: selLoc !== "all" ? selLoc : undefined,
+      }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      setConsolidacionPlan(data as ConsolidacionPlan);
+      setShowConsolidacion(true);
+    }
+  } catch {
+    // handled silently
+  } finally {
+    setLoadingConsolidacion(false);
+  }
+}
+// ── Plan Diario Completo ────────────────────────────────────────────────────
+async function handlePlanDiario(
+  overrideItems?: SubInvItem[],
+  overrideLocs?: Localizador[]
+) {
+  setLoadingDiario(true);
+  setConsolidacionPlan(null);
+  setPlanDiario(null);
+  try {
+    const items = overrideItems ?? fileSubInvItems;
+    const locs = overrideLocs ?? Object.values(allData).flat();
+    const resp = await fetch("/api/consolidacion-diaria", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items, locations: locs }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      setPlanDiario({
+        zonas_ordenadas: data.zonas_ordenadas ?? [],
+        zonas_sin_mapa: data.zonas_sin_mapa ?? [],
+        total_mezclas: data.total_mezclas ?? 0,
+        total_fragmentados: data.total_fragmentados ?? 0,
+      });
+      if (data.plan) {
+        setConsolidacionPlan(data.plan as ConsolidacionPlan);
+        setShowConsolidacion(true);
+      }
+    }
+  } catch {
+    // handled silently
+  } finally {
+    setLoadingDiario(false);
   }
 }
 // ── Datos para render ──────────────────────────────────────────────────
@@ -601,16 +691,25 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
     </div>
   )}
 
-  {/* ── SELECTOR DE ZONA ───────────────────────────────────────────────── */}
-  {uploadPhase === "zoneSelect" && fileZones.length > 0 && (
+  {/* ── SELECTOR DE ZONA + LOCALIZADOR ────────────────────────────────── */}
+  {uploadPhase === "zoneSelect" && fileZones.length > 0 && (() => {
+    const locOptions = selZone === "all"
+      ? Object.values(fileByZone).flat()
+      : fileByZone[selZone] || [];
+    const locItems = selLoc !== "all"
+      ? fileSubInvItems.filter(it => it.loc.toUpperCase() === selLoc.toUpperCase())
+      : [];
+    return (
     <div style={{ margin: "10px 20px 0", background: "#0d1a2b", border: "1px solid #1d4ed8", borderRadius: 10, padding: "14px 18px" }}>
       <div style={{ fontSize: 13, fontWeight: 700, color: "#93c5fd", marginBottom: 10 }}>
-        ✓ Archivo leído · {fileZones.length} zonas detectadas · Selecciona zona y localizador a procesar
+        ✓ Archivo leído · {fileZones.length} zonas · {fileSubInvItems.length} ítems · Selecciona zona y localizador
       </div>
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+
+      {/* Selectores */}
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
         <div>
           <div style={{ fontSize: 10, color: "#5a5e75", marginBottom: 4, letterSpacing: 1 }}>ZONA</div>
-          <select value={selZone} onChange={e => setSelZone(e.target.value)}
+          <select value={selZone} onChange={e => { setSelZone(e.target.value); setSelLoc("all"); }}
             style={{ fontSize: 12, padding: "6px 10px", border: "1px solid #2563eb", borderRadius: 6, background: "#0f1117", color: "#e8eaf0", outline: "none", minWidth: 160 }}>
             <option value="all">Todas las zonas</option>
             {fileZones.map(z => (
@@ -618,22 +717,61 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
             ))}
           </select>
         </div>
-        <div style={{ paddingTop: 18 }}>
-          <button onClick={handleGoToFormat}
-            style={{ padding: "7px 18px", background: "#2563eb", border: "none", borderRadius: 7, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", letterSpacing: 0.5 }}>
-            Ver formatos y localizador destino →
-          </button>
+        <div>
+          <div style={{ fontSize: 10, color: "#5a5e75", marginBottom: 4, letterSpacing: 1 }}>LOCALIZADOR</div>
+          <select value={selLoc} onChange={e => setSelLoc(e.target.value)}
+            style={{ fontSize: 12, padding: "6px 10px", border: "1px solid #7c3aed", borderRadius: 6, background: "#0f1117", color: "#e8eaf0", outline: "none", minWidth: 180 }}>
+            <option value="all">Todos los localizadores</option>
+            {locOptions.map(l => (
+              <option key={l.loc} value={l.loc}>{l.loc} · {l.pallets} plt</option>
+            ))}
+          </select>
         </div>
-        <div style={{ paddingTop: 18 }}>
-          <button onClick={() => setUploadPhase("idle")}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => void handlePlanDiario()} disabled={loadingDiario || fileSubInvItems.length === 0}
+            style={{ padding: "7px 18px", background: loadingDiario ? "#7f1d1d" : "#dc2626", border: "none", borderRadius: 7, color: "#fff", fontSize: 12, fontWeight: 700, cursor: loadingDiario ? "wait" : "pointer" }}>
+            {loadingDiario ? "⟳ Analizando zonas…" : "🔴 Plan Diario Completo"}
+          </button>
+          <button onClick={handleGoToFormat}
+            style={{ padding: "7px 16px", background: "#2563eb", border: "none", borderRadius: 7, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            Plan distribución →
+          </button>
+          <button onClick={handleConsolidacionExtrema} disabled={loadingConsolidacion || fileSubInvItems.length === 0}
+            style={{ padding: "7px 12px", background: loadingConsolidacion ? "#3b0764" : "#7c3aed", border: "none", borderRadius: 7, color: "#fff", fontSize: 12, fontWeight: 700, cursor: loadingConsolidacion ? "wait" : "pointer" }}>
+            {loadingConsolidacion ? "⟳" : "⚡ Zona"}
+          </button>
+          <button onClick={() => { setUploadPhase("idle"); setConsolidacionPlan(null); setPlanDiario(null); }}
             style={{ padding: "7px 12px", background: "transparent", border: "1px solid #374151", borderRadius: 7, color: "#5a5e75", fontSize: 12, cursor: "pointer" }}>
             Cancelar
           </button>
         </div>
       </div>
-      <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
+
+      {/* Preview del localizador seleccionado */}
+      {selLoc !== "all" && locItems.length > 0 && (
+        <div style={{ background: "#0f1117", border: "1px solid #3b0764", borderRadius: 8, padding: "10px 14px", marginBottom: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#a78bfa", marginBottom: 6 }}>
+            Contenido de {selLoc} · {locItems.length} ítems
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {locItems.map((it, i) => (
+              <div key={i} style={{ background: "#1a1d27", border: "1px solid #2e3247", borderRadius: 5, padding: "4px 8px", fontSize: 11 }}>
+                <span style={{ color: "#60a5fa", fontWeight: 600 }}>{it.codigo || "—"}</span>
+                <span style={{ color: "#5a5e75" }}> / </span>
+                <span style={{ color: "#c4b5fd" }}>L:{it.lote || "—"}</span>
+                <span style={{ color: "#5a5e75" }}> · </span>
+                <span style={{ color: "#4ade80", fontWeight: 700 }}>{it.pallets} plt</span>
+                {it.formato && <span style={{ color: "#5a5e75", marginLeft: 4, fontSize: 10 }}>[{it.formato}]</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Chips de zonas */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {fileZones.map(z => (
-          <span key={z} onClick={() => setSelZone(z)}
+          <span key={z} onClick={() => { setSelZone(z); setSelLoc("all"); }}
             style={{ fontSize: 11, padding: "3px 10px", borderRadius: 5, cursor: "pointer",
               background: selZone === z ? "#1d4ed8" : "#1e2235",
               color: selZone === z ? "#93c5fd" : "#5a5e75",
@@ -643,7 +781,8 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
         ))}
       </div>
     </div>
-  )}
+    );
+  })()}
 
   {/* ── TABLA DE FORMATOS Y LOCALIZADOR DESTINO ─────────────────────────── */}
   {uploadPhase === "formatCheck" && formatRows.length > 0 && (
@@ -770,6 +909,219 @@ return ( <div style={{ background: "#0f1117", minHeight: "100%", color: "#e8eaf0
                 {allLocs.filter(d => (d.ocupado || 0) > 0 && !((subInvMap ?? {})[d.localizador.toUpperCase()])).length}
               </span>
             </div>
+          </div>
+        )}
+      </div>
+    )}
+
+    {/* ── PANEL DE CRITICIDAD DIARIA ─────────────────────────────────── */}
+    {(planDiario || loadingDiario) && (
+      <div style={{ background: "#0f0808", border: "1px solid #dc2626", borderRadius: 10, marginBottom: 12, overflow: "hidden" }}>
+        <div style={{ background: "#1a0808", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 18 }}>🔴</span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#fca5a5" }}>Evaluación Diaria — Zonas por Criticidad</div>
+              <div style={{ fontSize: 11, color: "#f87171", marginTop: 1 }}>Zonas con más mezclas se ejecutan primero · Plan automático completo</div>
+            </div>
+          </div>
+          {planDiario && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 11, background: "#450a0a", color: "#fca5a5", padding: "3px 10px", borderRadius: 5 }}>{planDiario.total_mezclas} mezclas</span>
+              <span style={{ fontSize: 11, background: "#1e1a0a", color: "#fbbf24", padding: "3px 10px", borderRadius: 5 }}>{planDiario.total_fragmentados} fragmentados</span>
+              {planDiario.zonas_sin_mapa.length > 0 && (
+                <span style={{ fontSize: 11, background: "#1e1a0a", color: "#fbbf24", padding: "3px 10px", borderRadius: 5 }}>⚠ {planDiario.zonas_sin_mapa.length} sin mapa</span>
+              )}
+              <span style={{ fontSize: 11, background: "#1a2e1a", color: "#4ade80", padding: "3px 10px", borderRadius: 5 }}>{planDiario.zonas_ordenadas.length} zonas analizadas</span>
+            </div>
+          )}
+        </div>
+
+        {loadingDiario && (
+          <div style={{ padding: "24px", textAlign: "center", color: "#fca5a5", fontSize: 13 }}>
+            ⟳ Evaluando criticidad de todas las zonas y generando plan diario…
+          </div>
+        )}
+
+        {planDiario && (
+          <div style={{ padding: "12px 16px" }}>
+            {/* Localizadores sin mapa */}
+            {planDiario.zonas_sin_mapa.length > 0 && (
+              <div style={{ background: "#1a1100", border: "1px solid #92400e", borderRadius: 7, padding: "8px 12px", marginBottom: 10, fontSize: 11 }}>
+                <span style={{ color: "#fbbf24", fontWeight: 700 }}>⚠ {planDiario.zonas_sin_mapa.length} localizadores sin mapa</span>
+                <span style={{ color: "#78716c", marginLeft: 8 }}>— No existen en BD, crear esta semana para incluirlos en el análisis</span>
+                <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {planDiario.zonas_sin_mapa.slice(0, 30).map(loc => (
+                    <span key={loc} style={{ background: "#292218", border: "1px solid #92400e", borderRadius: 3, padding: "2px 6px", color: "#d97706", fontSize: 10 }}>{loc}</span>
+                  ))}
+                  {planDiario.zonas_sin_mapa.length > 30 && (
+                    <span style={{ color: "#78716c", fontSize: 10, alignSelf: "center" }}>+{planDiario.zonas_sin_mapa.length - 30} más</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Tabla de zonas por criticidad */}
+            {planDiario.zonas_ordenadas.length > 0 ? (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: "#1a0808", borderBottom: "1px solid #7f1d1d" }}>
+                      {["#", "ZONA", "NIVEL", "MEZCLAS", "FRAGMENTADOS", "PLT MEZCLA", "PLT FRAG.", "SCORE"].map(h => (
+                        <th key={h} style={{ padding: "7px 12px", textAlign: "left", color: "#5a5e75", fontWeight: 600, fontSize: 10, letterSpacing: 1, whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {planDiario.zonas_ordenadas.map((z, i) => {
+                      const nc = z.nivel === "CRITICO" ? "#f87171" : z.nivel === "ALTO" ? "#fb923c" : z.nivel === "MEDIO" ? "#fbbf24" : "#4ade80";
+                      const nb = z.nivel === "CRITICO" ? "#450a0a" : z.nivel === "ALTO" ? "#431407" : z.nivel === "MEDIO" ? "#1e1a0a" : "#1a2e1a";
+                      return (
+                        <tr key={z.zona} style={{ borderBottom: "1px solid #1e1010", background: i % 2 === 0 ? "transparent" : "#0d0808" }}>
+                          <td style={{ padding: "6px 12px", color: "#5a5e75", fontWeight: 700, fontSize: 11 }}>{i + 1}</td>
+                          <td style={{ padding: "6px 12px", fontWeight: 700, color: "#e8eaf0" }}>{z.zona}</td>
+                          <td style={{ padding: "6px 12px" }}>
+                            <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 3, fontWeight: 700, background: nb, color: nc }}>{z.nivel}</span>
+                          </td>
+                          <td style={{ padding: "6px 12px", textAlign: "right", color: z.num_locs_mezcladas > 0 ? "#f87171" : "#4ade80", fontWeight: z.num_locs_mezcladas > 0 ? 700 : 400 }}>{z.num_locs_mezcladas}</td>
+                          <td style={{ padding: "6px 12px", textAlign: "right", color: z.num_codigos_fragmentados > 0 ? "#fbbf24" : "#4ade80", fontWeight: z.num_codigos_fragmentados > 0 ? 700 : 400 }}>{z.num_codigos_fragmentados}</td>
+                          <td style={{ padding: "6px 12px", textAlign: "right", color: "#e8eaf0" }}>{z.pallets_en_mezcla}</td>
+                          <td style={{ padding: "6px 12px", textAlign: "right", color: "#e8eaf0" }}>{z.pallets_fragmentados}</td>
+                          <td style={{ padding: "6px 12px", textAlign: "right", color: nc, fontWeight: 700 }}>{z.score_criticidad}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", color: "#4ade80", fontSize: 13, padding: 16 }}>
+                ✓ Todas las zonas están limpias. Sin mezclas ni fragmentación.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )}
+
+    {/* ── PLAN DE ORGANIZACIÓN EXTREMA ──────────────────────────────── */}
+    {(consolidacionPlan || loadingConsolidacion) && (
+      <div style={{ background: "#0d0a1a", border: "1px solid #7c3aed", borderRadius: 10, marginBottom: 12, overflow: "hidden" }}>
+        <div style={{ background: "#1e0a3c", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 16 }}>⚡</span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#c4b5fd" }}>Plan de Organización Extrema</div>
+              <div style={{ fontSize: 11, color: "#a78bfa", marginTop: 1 }}>
+                {planDiario ? "Plan diario · todas las zonas" : selLoc !== "all" ? `Anclado en ${selLoc}` : "Todas las zonas"} · Fase 1: Liberar mezclas · Fase 2: Consolidar lotes
+              </div>
+            </div>
+          </div>
+          {consolidacionPlan && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, background: "#4c1d95", color: "#c4b5fd", padding: "3px 10px", borderRadius: 5 }}>
+                {consolidacionPlan.resumen.total_movimientos} movimientos
+              </span>
+              <span style={{ fontSize: 11, background: "#1a2e1a", color: "#4ade80", padding: "3px 10px", borderRadius: 5 }}>
+                {consolidacionPlan.resumen.pallets_movidos} plt
+              </span>
+              <span style={{ fontSize: 11, background: "#1e1a0a", color: "#fbbf24", padding: "3px 10px", borderRadius: 5 }}>
+                {consolidacionPlan.resumen.locs_liberadas_count} loc liberadas
+              </span>
+              {consolidacionPlan.resumen.sin_espacio_count > 0 && (
+                <span style={{ fontSize: 11, background: "#2e1a1a", color: "#f87171", padding: "3px 10px", borderRadius: 5 }}>
+                  ⚠ {consolidacionPlan.resumen.sin_espacio_count} sin espacio
+                </span>
+              )}
+              <button onClick={() => setShowConsolidacion(!showConsolidacion)}
+                style={{ padding: "4px 12px", fontSize: 11, border: "1px solid #7c3aed", borderRadius: 6, background: showConsolidacion ? "#7c3aed" : "#0f1117", color: "#fff", cursor: "pointer" }}>
+                {showConsolidacion ? "Ocultar" : "Ver plan"}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {loadingConsolidacion && (
+          <div style={{ padding: "20px", textAlign: "center", color: "#a78bfa", fontSize: 13 }}>
+            ⟳ El cerebro está calculando la organización óptima…
+          </div>
+        )}
+
+        {showConsolidacion && consolidacionPlan && consolidacionPlan.movimientos.length > 0 && (
+          <div style={{ padding: "12px 16px" }}>
+            {/* Resumen de fases */}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+              {[
+                { label: "Fase 1: Liberar mezclas", count: consolidacionPlan.resumen.fase_liberar, color: "#fbbf24", bg: "#1e1a0a" },
+                { label: "Fase 2: Consolidar lotes", count: consolidacionPlan.resumen.fase_consolidar, color: "#4ade80", bg: "#1a2e1a" },
+                { label: "Lotes consolidados", count: consolidacionPlan.resumen.lotes_consolidados, color: "#60a5fa", bg: "#0f1a2e" },
+              ].map(s => (
+                <div key={s.label} style={{ background: s.bg, borderRadius: 7, padding: "6px 14px", fontSize: 12 }}>
+                  <span style={{ color: "#8b8fa8" }}>{s.label}: </span>
+                  <span style={{ color: s.color, fontWeight: 700 }}>{s.count}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Lista de movimientos */}
+            <div style={{ maxHeight: 500, overflowY: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+                  <tr style={{ background: "#0d0a1a", borderBottom: "1px solid #3b0764" }}>
+                    {["#", "TIPO", "CÓDIGO", "LOTE", "PLT", "FORMATO", "ORIGEN", "DESTINO", "RAZÓN"].map(h => (
+                      <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: "#5a5e75", fontWeight: 600, fontSize: 10, letterSpacing: 1, whiteSpace: "nowrap" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {consolidacionPlan.movimientos.map((m, i) => (
+                    <tr key={i} style={{ borderBottom: "1px solid #1e1a2e", background: m.tipo === "liberar" ? "rgba(251,191,36,.04)" : "rgba(74,222,128,.04)" }}>
+                      <td style={{ padding: "5px 10px", color: "#5a5e75", fontWeight: 700, fontSize: 10 }}>{m.paso}</td>
+                      <td style={{ padding: "5px 10px" }}>
+                        <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 3, fontWeight: 700,
+                          background: m.tipo === "liberar" ? "#1e1a0a" : "#1a2e1a",
+                          color: m.tipo === "liberar" ? "#fbbf24" : "#4ade80" }}>
+                          {m.tipo === "liberar" ? "LIBERAR" : "CONSOLIDAR"}
+                        </span>
+                      </td>
+                      <td style={{ padding: "5px 10px", color: "#60a5fa", fontWeight: 600 }}>{m.codigo}</td>
+                      <td style={{ padding: "5px 10px", color: "#c4b5fd", fontSize: 10 }}>{m.lote}</td>
+                      <td style={{ padding: "5px 10px", color: "#4ade80", fontWeight: 700, textAlign: "right" }}>{m.pallets}</td>
+                      <td style={{ padding: "5px 10px", color: "#8b8fa8", fontSize: 10 }}>{m.formato || "—"}</td>
+                      <td style={{ padding: "5px 10px" }}>
+                        <span style={{ color: "#f87171", fontWeight: 600 }}>{m.loc_origen}</span>
+                        <span style={{ color: "#374151", fontSize: 10 }}> {m.zona_origen}</span>
+                      </td>
+                      <td style={{ padding: "5px 10px" }}>
+                        <span style={{ color: "#4ade80", fontWeight: 600 }}>{m.loc_destino}</span>
+                        <span style={{ color: "#374151", fontSize: 10 }}> {m.zona_destino}</span>
+                      </td>
+                      <td style={{ padding: "5px 10px", color: "#5a5e75", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.razon}>{m.razon}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Sin espacio */}
+            {consolidacionPlan.sin_espacio.length > 0 && (
+              <div style={{ marginTop: 10, background: "#1a0a0a", border: "1px solid #7f1d1d", borderRadius: 8, padding: "10px 14px" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#f87171", marginBottom: 6 }}>
+                  ⚠ Ítems sin espacio disponible ({consolidacionPlan.sin_espacio.length})
+                </div>
+                {consolidacionPlan.sin_espacio.map((s, i) => (
+                  <div key={i} style={{ fontSize: 11, color: "#fca5a5", marginBottom: 3, paddingLeft: 8 }}>
+                    <span style={{ color: "#60a5fa" }}>{s.codigo}</span>/{s.lote} · {s.pallets} plt desde {s.loc_origen} — {s.motivo}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {showConsolidacion && consolidacionPlan && consolidacionPlan.movimientos.length === 0 && (
+          <div style={{ padding: "20px", textAlign: "center", color: "#4ade80", fontSize: 13 }}>
+            ✓ El almacén ya está perfectamente organizado. No se requieren movimientos.
           </div>
         )}
       </div>

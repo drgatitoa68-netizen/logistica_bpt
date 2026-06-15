@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
-from routers import auth, lineas, localizadores, plan, upload
+from routers import auth, consolidacion, lineas, localizadores, plan, upload
 
 app = FastAPI(
     title="Logística BPT — API",
@@ -18,6 +18,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(consolidacion.router)
 app.include_router(lineas.router)
 app.include_router(localizadores.router)
 app.include_router(plan.router)
