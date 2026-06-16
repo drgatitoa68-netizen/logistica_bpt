@@ -4,7 +4,10 @@ import { getBrowserClient } from "@/lib/supabase/browser";
 const db = getBrowserClient();
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface Localizador { zona: string; localizador: string; formato?: string; capacidad: number; ocupado: number; disponible: number; pct_ocupacion: number; activo?: boolean; }
-interface SubInvItem { loc: string; subinv: string; formato: string; lote: string; pallets: number; codigo?: string; }
+interface SubInvItem {
+  loc: string; subinv: string; formato: string; lote: string; pallets: number; codigo?: string;
+  descripcion?: string; cajas?: number; cantidad_fisica?: number; cod_org_inv?: string;
+}
 interface Asignacion { loc: string; zona: string; palletsAsignados: number; prioridad?: string; }
 interface PlanEntry { formato: string; lote: string; palletsNeed: number; asignaciones: Asignacion[]; palletsAsignados: number; palletsRestantes: number; cobertura_pct?: number; }
 interface FragmentacionItem { formato: string; total_pallets: number; num_localizadores: number; nivel: string; indice: number; }
@@ -81,7 +84,7 @@ const avgGlobal = totalCap > 0 ? totalOcup / totalCap : 0;
 const subInvMap = selectedSubInv !== "all" ? (subInvStock[selectedSubInv] ?? {}) : null; const subInvStats = subInvMap ? (() => { const keys = Object.keys(subInvMap); const total = keys.reduce((s, k) => s + (subInvMap[k] || 0), 0); return { locs: keys.length, total }; })() : null;
 const stats = useMemo(() => [ { v: allLocs.length, l: "Localizadores" }, { v: Object.keys(allData).length, l: "Zonas" }, { v: (avgGlobal * 100).toFixed(1) + "%", l: "Ocupación global" }, { v: conStock, l: "Con stock" }, { v: totalPalletsLibres, l: "Pallets libres" }, { v: conExceso, l: "Con exceso" }, ], [allLocs.length, allData, avgGlobal, conStock, totalPalletsLibres, conExceso]);
 // ── Detectar columnas del Excel ─────────────────────────────────────────
-function detectHeader(rows: unknown[][]): { headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number; cantColIdx: number; subInvColIdx: number; formatoColIdx: number; loteColIdx: number; codigoColIdx: number; } { let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1; let cajasColIdx = -1, cantColIdx = -1, subInvColIdx = -1; let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1;
+function detectHeader(rows: unknown[][]): { headerRowIdx: number; locColIdx: number; tarimasColIdx: number; cajasColIdx: number; cantColIdx: number; subInvColIdx: number; formatoColIdx: number; loteColIdx: number; codigoColIdx: number; descColIdx: number; codOrgInvColIdx: number; } { let headerRowIdx = -1, locColIdx = -1, tarimasColIdx = -1; let cajasColIdx = -1, cantColIdx = -1, subInvColIdx = -1; let formatoColIdx = -1, loteColIdx = -1, codigoColIdx = -1; let descColIdx = -1, codOrgInvColIdx = -1;
 for (let i = 0; i < Math.min(30, rows.length); i++) {
   const row = (rows[i] as unknown[]).map(c =>
     String(c).trim().toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
@@ -162,9 +165,24 @@ for (let i = 0; i < Math.min(30, rows.length); i++) {
       if (v && !isNaN(parseFloat(v))) { cantColIdx = ci; break; }
     }
   }
+
+  // Detectar descripcion
+  descColIdx = row.findIndex((c, idx) =>
+    idx !== li && idx !== subInvColIdx && idx !== codigoColIdx &&
+    (c === "DESCRIPCION" || c === "DESCRIPCION ARTICULO" || c === "DESCRIPCION PRODUCTO" ||
+     c === "DESC" || c === "NOMBRE" || c.startsWith("DESCRIP"))
+  );
+
+  // Detectar cod_org_inv
+  codOrgInvColIdx = row.findIndex((c, idx) =>
+    idx !== li && idx !== codigoColIdx &&
+    (c === "COD ORG INV" || c === "COD_ORG_INV" || c === "CODORGINV" ||
+     c === "ORG INV" || c === "ORGANIZACION INV" || (c.includes("ORG") && c.includes("INV")))
+  );
+
   break;
 }
-return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx };
+return { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgInvColIdx };
 }
 // ── Procesar Excel ─────────────────────────────────────────────────────
 async function processExcel(file: File) { setImporting(true); setProgress(0); setProgressLabel(""); setImportLog([]);
@@ -235,7 +253,7 @@ try {
     setProgress(8);
 
     log("⟳ Detectando estructura del archivo…");
-    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx } = detectHeader(rows);
+    const { headerRowIdx, locColIdx, tarimasColIdx, cajasColIdx, cantColIdx, subInvColIdx, formatoColIdx, loteColIdx, codigoColIdx, descColIdx, codOrgInvColIdx } = detectHeader(rows);
 
     if (headerRowIdx < 0 || locColIdx < 0) {
       const preview = rows.slice(0, 8).map((r, i) =>
@@ -302,8 +320,18 @@ try {
           subInvSet.add(si);
           if (!bySubInv[si]) bySubInv[si] = {};
           bySubInv[si][loc] = (bySubInv[si][loc] ?? 0) + pallets;
-          const cod = codigoColIdx >= 0 ? String(r[codigoColIdx] || "").trim() : "";
-          subInvItems.push({ loc, subinv: si, formato: fmt, lote: lot, pallets, codigo: cod });
+          const cod        = codigoColIdx    >= 0 ? String(r[codigoColIdx]    || "").trim() : "";
+          const desc       = descColIdx      >= 0 ? String(r[descColIdx]      || "").trim() : "";
+          const codOrgInv  = codOrgInvColIdx >= 0 ? String(r[codOrgInvColIdx] || "").trim() : "";
+          const cajasVal   = cajasColIdx     >= 0 ? (parseFloat(String(r[cajasColIdx] || "0")) || 0) : 0;
+          const cantVal    = cantColIdx      >= 0 ? (parseFloat(String(r[cantColIdx]  || "0")) || 0) : undefined;
+          subInvItems.push({
+            loc, subinv: si, formato: fmt, lote: lot, pallets, codigo: cod,
+            descripcion: desc || undefined,
+            cajas: cajasVal,
+            cantidad_fisica: cantVal,
+            cod_org_inv: codOrgInv || undefined,
+          });
         }
       }
     }
@@ -396,6 +424,45 @@ try {
       done += group.reduce((s, b) => s + b.length, 0);
       setProgress(48 + Math.round((done / updates.length) * 40));
       setProgressLabel(`Actualizando BD… ${done}/${updates.length}`);
+    }
+
+    // ── PASO 5.5: importar inventario por subinventario via RPC ─────
+    if (subInvItems.length > 0 && subInvArr.length > 0) {
+      log(`⟳ Importando ${subInvItems.length} ítems a inventario (${subInvArr.length} subinventarios)…`);
+      setProgressLabel("Importando inventario…");
+      let invOk = 0, invErr = 0;
+      for (const si of subInvArr) {
+        const rows4si = subInvItems
+          .filter(it => it.subinv === si)
+          .map(it => ({
+            codigo:          it.codigo        || "",
+            descripcion:     it.descripcion   || null,
+            lote:            it.lote          || null,
+            localizador:     it.loc,
+            pallets:         it.pallets,
+            cajas:           it.cajas         ?? 0,
+            cantidad_fisica: it.cantidad_fisica ?? null,
+            formato:         it.formato        || null,
+            cod_org_inv:     it.cod_org_inv    || null,
+          }));
+        if (!rows4si.length) continue;
+        const { error: rpcErr } = await db.rpc("importar_subinventario", {
+          p_subinventario: si,
+          p_rows:          rows4si,
+        });
+        if (rpcErr) {
+          log(`⚠ Inventario ${si}: ${rpcErr.message}`, "warn");
+          invErr++;
+        } else {
+          invOk++;
+        }
+      }
+      log(
+        invErr === 0
+          ? `✓ Inventario actualizado: ${subInvArr.length} subinventario${subInvArr.length > 1 ? "s" : ""} · ${subInvItems.length} registros`
+          : `⚠ Inventario: ${invOk} OK · ${invErr} con error`,
+        invErr === 0 ? "ok" : "warn"
+      );
     }
 
     // ── PASO 6: guardar subinventarios en estado ──────────────────
