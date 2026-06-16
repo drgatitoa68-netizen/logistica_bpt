@@ -24,7 +24,7 @@ interface FraccionForm {
 
 interface InvItem {
   id: string;
-  cod_org_inv: string;
+  cod_org_inv?: string;
   codigo: string;
   descripcion: string;
   lote: string;
@@ -33,8 +33,6 @@ interface InvItem {
   pallets: number;
   cajas: number;
   cantidad_fisica: number;
-  inv_pe?: number;
-  conteo?: number;
 }
 
 interface RowDest { loc: string; subinv: string; responsable: string; inv_pe: string; conteo: string; }
@@ -117,31 +115,73 @@ export default function OrdenesProduccionPage() {
     setNlOrden(""); setNlZona(""); setNlLoc(""); setNlDestLoc(""); setNlDestSubinv("ALMACEN");
     setNlTipoOrden("PRODUCCION");
     setInvItems([]); setSelInv(new Set()); setRowDest(new Map());
-    const { data } = await db.from("localizadores").select("zona").eq("activo", true).order("zona");
-    const zonasList = [...new Set((data ?? []).map((r: { zona: string }) => r.zona))];
-    setZonas(zonasList);
+    // Carga zonas: de localizadores + subinventarios únicos de lineas_reubicacion
+    const [{ data: locsData }, { data: linData }] = await Promise.all([
+      db.from("localizadores").select("zona").eq("activo", true).order("zona"),
+      db.from("lineas_reubicacion").select("subinventario_origen").in("estado", ["pendiente", "rechazada"]),
+    ]);
+    const fromLocs = (locsData ?? []).map((r: { zona: string }) => r.zona);
+    const fromLin  = [...new Set((linData ?? []).map((r: { subinventario_origen: string }) => r.subinventario_origen).filter(Boolean))];
+    // Subinventarios de lineas van primero, luego zonas del mapa
+    const all = [...new Set([...fromLin, ...fromLocs])];
+    setZonas(all);
   }
 
   async function onZonaChange(zona: string) {
-    setNlZona(zona); setNlLoc(""); setInvItems([]); setSelInv(new Set());
+    setNlZona(zona); setNlLoc(""); setInvItems([]); setSelInv(new Set()); setRowDest(new Map());
     if (!zona) { setLocsPorZona([]); return; }
-    const { data } = await db.from("localizadores").select("localizador").eq("zona", zona).eq("activo", true).order("localizador");
-    setLocsPorZona((data ?? []).map((r: { localizador: string }) => r.localizador));
+    // Localizadores del mapa para esa zona
+    const { data: mapLocs } = await db.from("localizadores").select("localizador").eq("zona", zona).eq("activo", true).order("localizador");
+    // Localizadores de origen en lineas para ese subinventario
+    const { data: linLocs } = await db.from("lineas_reubicacion")
+      .select("localizador_origen")
+      .eq("subinventario_origen", zona)
+      .in("estado", ["pendiente", "rechazada"]);
+    const fromMap = (mapLocs ?? []).map((r: { localizador: string }) => r.localizador);
+    const fromLin = [...new Set((linLocs ?? []).map((r: { localizador_origen: string }) => r.localizador_origen).filter(Boolean))];
+    setLocsPorZona([...new Set([...fromLin, ...fromMap])]);
   }
 
   async function onLocChange(loc: string) {
     setNlLoc(loc); setInvItems([]); setSelInv(new Set()); setRowDest(new Map());
     if (!loc) return;
     setLoadingInv(true);
-    const { data } = await db.from("inventario")
-      .select("id,cod_org_inv,codigo,descripcion,lote,localizador,subinventario,pallets,cajas,cantidad_fisica,inv_pe,conteo")
-      .eq("localizador", loc)
-      .order("codigo");
-    const items = (data as InvItem[]) ?? [];
+    // 1. Intenta primero con inventario
+    const { data: invData } = await db.from("inventario")
+      .select("id,cod_org_inv,codigo,descripcion,lote,localizador,subinventario,pallets,cajas,cantidad_fisica")
+      .eq("localizador", loc).order("codigo");
+    let items = (invData as InvItem[]) ?? [];
+
+    // 2. Fallback: lineas_reubicacion pendientes/rechazadas con ese localizador de origen
+    if (items.length === 0) {
+      const { data: linData } = await db.from("lineas_reubicacion")
+        .select("id,cod_org_inv,codigo,descripcion,lote,localizador_origen,subinventario_origen,pallets,cajas,cantidad_fisica,localizador_destino,subinventario_destino,inv_pe,conteo")
+        .eq("localizador_origen", loc)
+        .in("estado", ["pendiente", "rechazada"])
+        .order("codigo");
+      items = (linData ?? []).map((r: {
+        id: string; cod_org_inv?: string; codigo: string; descripcion: string; lote: string;
+        localizador_origen: string; subinventario_origen: string; pallets: number; cajas: number; cantidad_fisica: number;
+        localizador_destino?: string; subinventario_destino?: string; inv_pe?: number; conteo?: number;
+      }) => ({
+        id: r.id, cod_org_inv: r.cod_org_inv, codigo: r.codigo, descripcion: r.descripcion,
+        lote: r.lote, localizador: r.localizador_origen, subinventario: r.subinventario_origen,
+        pallets: r.pallets, cajas: r.cajas, cantidad_fisica: r.cantidad_fisica,
+        _destLoc: r.localizador_destino, _destSubinv: r.subinventario_destino,
+        _inv_pe: r.inv_pe, _conteo: r.conteo,
+      })) as InvItem[];
+    }
+
     setInvItems(items);
     setSelInv(new Set(items.map(i => i.id)));
     const initDest = new Map<string, RowDest>();
-    items.forEach(i => initDest.set(i.id, { loc: nlDestLoc, subinv: nlDestSubinv, responsable: "", inv_pe: i.inv_pe != null ? String(i.inv_pe) : "", conteo: i.conteo != null ? String(i.conteo) : "" }));
+    items.forEach(i => initDest.set(i.id, {
+      loc:         (i as InvItem & { _destLoc?: string })._destLoc || nlDestLoc,
+      subinv:      (i as InvItem & { _destSubinv?: string })._destSubinv || nlDestSubinv,
+      responsable: "",
+      inv_pe:      String((i as InvItem & { _inv_pe?: number })._inv_pe ?? ""),
+      conteo:      String((i as InvItem & { _conteo?: number })._conteo ?? ""),
+    }));
     setRowDest(initDest);
     setLoadingInv(false);
   }
@@ -164,7 +204,7 @@ export default function OrdenesProduccionPage() {
             descripcion: i.descripcion || "", subinventario_origen: i.subinventario || "ALMACEN",
             localizador_origen: i.localizador || "", lote: i.lote || "",
             cantidad_fisica: i.cantidad_fisica || 0, pallets: i.pallets || 0,
-            cajas: i.cajas || 0, responsable: "", conteo: i.conteo ?? null,
+            cajas: i.cajas || 0, responsable: "", conteo: null,
           })),
         }),
       });
@@ -592,7 +632,7 @@ export default function OrdenesProduccionPage() {
                                 <input type="number" value={dest.inv_pe} onChange={e => updateRowDest(item.id, "inv_pe", e.target.value)}
                                   placeholder="0" style={{ ...s.nlInput, fontSize: 10, padding: "3px 6px", width: 55 }} />
                               </td>
-                              <td style={{ ...s.td, color: "#64748b" }}>{item.conteo ?? "—"}</td>
+                              <td style={{ ...s.td, color: "#64748b" }}>—</td>
                             </tr>
                           );
                         })}
