@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { getBrowserClient } from "@/lib/supabase/browser";
 import { debounce } from "@/lib/utils/debounce";
 import { Linea } from "@/lib/shared/ordenes";
-import { aprobarLineaDirecta, rechazarLinea, fraccionarLinea, actualizarResponsable } from "@/app/actions/ordenes";
+import { aprobarLineaDirecta, rechazarLinea, fraccionarLinea, actualizarResponsable, crearLineas } from "@/app/actions/ordenes";
 import * as XLSX from "xlsx";
 
 const db = getBrowserClient();
@@ -17,9 +17,27 @@ interface FraccionForm {
   lineaId:  string;
   original: Linea;
   p1:       number;
+  c1:       number;
   dest1:    string;
   dest2:    string;
 }
+
+interface InvItem {
+  id: string;
+  cod_org_inv: string;
+  codigo: string;
+  descripcion: string;
+  lote: string;
+  localizador: string;
+  subinventario: string;
+  pallets: number;
+  cajas: number;
+  cantidad_fisica: number;
+  inv_pe?: number;
+  conteo?: number;
+}
+
+interface RowDest { loc: string; subinv: string; responsable: string; inv_pe: string; conteo: string; }
 
 function timeAgo(iso: string) {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -47,6 +65,22 @@ export default function OrdenesProduccionPage() {
   const [rejectTarget, setRejectTarget] = useState<string[] | null>(null);
   const [rejectNota,   setRejectNota]   = useState("");
   const [fraccion,     setFraccion]     = useState<FraccionForm | null>(null);
+
+  // ── Modal nueva línea desde inventario ────────────────────────────────────
+  const [nuevaLinea,   setNuevaLinea]   = useState(false);
+  const [nlOrden,      setNlOrden]      = useState("");
+  const [nlZona,       setNlZona]       = useState("");
+  const [nlLoc,        setNlLoc]        = useState("");
+  const [nlDestLoc,    setNlDestLoc]    = useState("");
+  const [nlDestSubinv, setNlDestSubinv] = useState("ALMACEN");
+  const [zonas,        setZonas]        = useState<string[]>([]);
+  const [locsPorZona,  setLocsPorZona]  = useState<string[]>([]);
+  const [invItems,     setInvItems]     = useState<InvItem[]>([]);
+  const [selInv,       setSelInv]       = useState<Set<string>>(new Set());
+  const [loadingInv,   setLoadingInv]   = useState(false);
+  const [rowDest,      setRowDest]      = useState<Map<string, RowDest>>(new Map());
+  const [suggesting,   setSuggesting]   = useState(false);
+  const [nlTipoOrden,  setNlTipoOrden]  = useState<"PRODUCCION" | "CONSOLIDACION_SALDOS" | "CONSOLIDACION_VOLUMEN">("PRODUCCION");
 
   const [search,       setSearch]       = useState("");
   const [fOperador,    setFOperador]    = useState("all");
@@ -76,6 +110,113 @@ export default function OrdenesProduccionPage() {
   }, [load]);
 
   const showFlash = (msg: string, ok = true) => { setFlash({ msg, ok }); setTimeout(() => setFlash(null), 3500); };
+
+  // ── Carga modal inventario ─────────────────────────────────────────────────
+  async function abrirNuevaLinea() {
+    setNuevaLinea(true);
+    setNlOrden(""); setNlZona(""); setNlLoc(""); setNlDestLoc(""); setNlDestSubinv("ALMACEN");
+    setNlTipoOrden("PRODUCCION");
+    setInvItems([]); setSelInv(new Set()); setRowDest(new Map());
+    const { data } = await db.from("localizadores").select("zona").eq("activo", true).order("zona");
+    const zonasList = [...new Set((data ?? []).map((r: { zona: string }) => r.zona))];
+    setZonas(zonasList);
+  }
+
+  async function onZonaChange(zona: string) {
+    setNlZona(zona); setNlLoc(""); setInvItems([]); setSelInv(new Set());
+    if (!zona) { setLocsPorZona([]); return; }
+    const { data } = await db.from("localizadores").select("localizador").eq("zona", zona).eq("activo", true).order("localizador");
+    setLocsPorZona((data ?? []).map((r: { localizador: string }) => r.localizador));
+  }
+
+  async function onLocChange(loc: string) {
+    setNlLoc(loc); setInvItems([]); setSelInv(new Set()); setRowDest(new Map());
+    if (!loc) return;
+    setLoadingInv(true);
+    const { data } = await db.from("inventario")
+      .select("id,cod_org_inv,codigo,descripcion,lote,localizador,subinventario,pallets,cajas,cantidad_fisica,inv_pe,conteo")
+      .eq("localizador", loc)
+      .order("codigo");
+    const items = (data as InvItem[]) ?? [];
+    setInvItems(items);
+    setSelInv(new Set(items.map(i => i.id)));
+    const initDest = new Map<string, RowDest>();
+    items.forEach(i => initDest.set(i.id, { loc: nlDestLoc, subinv: nlDestSubinv, responsable: "", inv_pe: i.inv_pe != null ? String(i.inv_pe) : "", conteo: i.conteo != null ? String(i.conteo) : "" }));
+    setRowDest(initDest);
+    setLoadingInv(false);
+  }
+
+  function updateRowDest(id: string, field: keyof RowDest, value: string) {
+    setRowDest(p => { const n = new Map(p); const r = n.get(id) ?? { loc: "", subinv: "ALMACEN", responsable: "", inv_pe: "", conteo: "" }; n.set(id, { ...r, [field]: field === "loc" ? value.toUpperCase() : value }); return n; });
+  }
+
+  async function sugerirDestinos() {
+    const items = invItems.filter(i => selInv.has(i.id));
+    if (!items.length) return;
+    setSuggesting(true);
+    try {
+      const res = await fetch("/api/plan-ubicacion", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stock: items.map((i, idx) => ({
+            row_idx: idx, cod_org_inv: i.cod_org_inv || "", codigo: i.codigo || "",
+            descripcion: i.descripcion || "", subinventario_origen: i.subinventario || "ALMACEN",
+            localizador_origen: i.localizador || "", lote: i.lote || "",
+            cantidad_fisica: i.cantidad_fisica || 0, pallets: i.pallets || 0,
+            cajas: i.cajas || 0, responsable: "", conteo: i.conteo ?? null,
+          })),
+        }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const assigned: { row_idx: number; localizador_destino: string; subinventario_destino: string }[] = json.assigned ?? json ?? [];
+        setRowDest(p => {
+          const n = new Map(p);
+          assigned.forEach((a, idx) => {
+            const item = items[a.row_idx ?? idx];
+            if (!item) return;
+            const prev = n.get(item.id) ?? { loc: "", subinv: "ALMACEN", responsable: "", inv_pe: "", conteo: "" };
+            n.set(item.id, { ...prev, loc: a.localizador_destino || prev.loc, subinv: a.subinventario_destino || prev.subinv });
+          });
+          return n;
+        });
+      }
+    } catch { /* ignorar errores de la API */ }
+    setSuggesting(false);
+  }
+
+  async function confirmarCrearDesdeInv() {
+    const items = invItems.filter(i => selInv.has(i.id));
+    if (!items.length) { showFlash("Selecciona al menos una línea", false); return; }
+    setSaving("nueva");
+    const lines = items.map(i => {
+      const dest = rowDest.get(i.id);
+      return {
+        numero_orden:          nlOrden.trim() || undefined,
+        cod_org_inv:           i.cod_org_inv || undefined,
+        codigo:                i.codigo || undefined,
+        descripcion:           i.descripcion || "Sin descripción",
+        lote:                  i.lote || undefined,
+        subinventario_origen:  i.subinventario || "ALMACEN",
+        localizador_origen:    i.localizador,
+        pallets:               i.pallets || 0,
+        cajas:                 i.cajas || 0,
+        cantidad_fisica:       i.cantidad_fisica || undefined,
+        subinventario_destino: dest?.subinv || undefined,
+        localizador_destino:   dest?.loc?.trim() || undefined,
+        responsable:           dest?.responsable?.trim() || undefined,
+        inv_pe:                dest?.inv_pe ? Number(dest.inv_pe) : undefined,
+        notas:                 nlTipoOrden ? `[${nlTipoOrden}]` : undefined,
+      };
+    });
+    const res = await crearLineas(lines);
+    setSaving(null);
+    if (res?.error) { showFlash(`❌ ${res.error}`, false); return; }
+    showFlash(`✓ ${items.length} línea${items.length > 1 ? "s" : ""} creada${items.length > 1 ? "s" : ""}`);
+    setNuevaLinea(false);
+    load();
+  }
 
   // ── Acciones ──────────────────────────────────────────────────────────────
   async function aprobar(ids: string[]) {
@@ -116,23 +257,25 @@ export default function OrdenesProduccionPage() {
 
   async function confirmarFraccion() {
     if (!fraccion) return;
-    const { original, p1, dest1, dest2 } = fraccion;
+    const { original, p1, c1, dest1, dest2 } = fraccion;
     const ptotal = original.pallets || 0;
-    const p2     = ptotal - p1;
-    if (p1 <= 0 || p2 <= 0)  { showFlash("Cada fracción debe tener ≥ 1 pallet", false); return; }
-    if (!dest1.trim())        { showFlash("Ingresa destino de la fracción 1", false); return; }
-    if (!dest2.trim())        { showFlash("Ingresa destino de la fracción 2", false); return; }
-    const metTotal = original.metraje ?? Math.round(ptotal * 1.2 * 100) / 100;
-    const met1 = Math.round((p1 / ptotal) * metTotal * 100) / 100;
-    const met2 = Math.round((metTotal - met1) * 100) / 100;
+    const ctotal = original.cajas  || 0;
+    const p2 = ptotal - p1;
+    const c2 = ctotal - c1;
+    if (p1 <= 0 || p2 <= 0) { showFlash("Cada fracción debe tener ≥ 1 pallet", false); return; }
+    if (c1 < 0 || c2 < 0)   { showFlash(`Las cajas de F1 no pueden superar ${ctotal}`, false); return; }
+    if (!dest1.trim())       { showFlash("Ingresa destino de la fracción 1", false); return; }
+    if (!dest2.trim())       { showFlash("Ingresa destino de la fracción 2", false); return; }
+    const met1 = Math.round(p1 * 1.2 * 100) / 100;
+    const met2 = Math.round(p2 * 1.2 * 100) / 100;
     setSaving("bulk");
     const res = await fraccionarLinea(fraccion.lineaId,
-      { pallets: p1, cajas: 0, cantidad_fisica: p1, metraje: met1, localizador_destino: dest1.trim().toUpperCase(), subinventario_destino: "ALMACEN" },
-      { pallets: p2, cajas: 0, cantidad_fisica: p2, metraje: met2, localizador_destino: dest2.trim().toUpperCase(), subinventario_destino: "ALMACEN" }
+      { pallets: p1, cajas: c1, cantidad_fisica: p1, metraje: met1, localizador_destino: dest1.trim().toUpperCase(), subinventario_destino: "ALMACEN" },
+      { pallets: p2, cajas: c2, cantidad_fisica: p2, metraje: met2, localizador_destino: dest2.trim().toUpperCase(), subinventario_destino: "ALMACEN" }
     );
     setSaving(null);
     if (res?.error) { showFlash(`❌ ${res.error}`, false); return; }
-    showFlash(`✓ Fraccionado: F1=${p1}plt (${met1}m²) · F2=${p2}plt (${met2}m²)`);
+    showFlash(`✓ Fraccionado: F1=${p1}plt/${c1}cj (${met1}m²) · F2=${p2}plt/${c2}cj (${met2}m²)`);
     setFraccion(null); load();
   }
 
@@ -186,10 +329,16 @@ export default function OrdenesProduccionPage() {
       )}
 
       {/* Header */}
-      <div style={s.header}>
-        <div style={s.badge}>SUPERVISOR — CONTROL DE CALIDAD</div>
-        <h1 style={s.title}>Órdenes de Producción</h1>
-        <p style={s.sub}>Verifica cada línea, asigna operador, fracciona si es necesario y aprueba.</p>
+      <div style={{ ...s.header, display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 12 }}>
+        <div>
+          <div style={s.badge}>SUPERVISOR — CONTROL DE CALIDAD</div>
+          <h1 style={s.title}>Órdenes de Producción</h1>
+          <p style={s.sub}>Verifica cada línea, asigna operador, fracciona si es necesario y aprueba.</p>
+        </div>
+        <button onClick={abrirNuevaLinea}
+          style={{ marginTop: 24, fontSize: 11, fontWeight: 700, letterSpacing: 1.5, padding: "9px 18px", border: "1px solid rgba(249,115,22,0.5)", borderRadius: 4, background: "rgba(249,115,22,0.08)", color: "#f97316", cursor: "pointer", fontFamily: "'Courier New', monospace", whiteSpace: "nowrap" as const }}>
+          + NUEVA LÍNEA
+        </button>
       </div>
 
       {/* Stats */}
@@ -296,10 +445,187 @@ export default function OrdenesProduccionPage() {
               onToggle={toggleSel}
               onAprobar={aprobar}
               onRechazar={ids => { setRejectTarget(ids); setRejectNota(""); }}
-              onFraccionar={l => setFraccion({ lineaId: l.id, original: l, p1: Math.max(1, Math.floor((l.pallets || 2) / 2)), dest1: l.localizador_destino || "", dest2: "" })}
+              onFraccionar={l => setFraccion({ lineaId: l.id, original: l, p1: Math.max(1, Math.floor((l.pallets || 2) / 2)), c1: Math.floor((l.cajas || 0) / 2), dest1: l.localizador_destino || "", dest2: "" })}
               onAsignarOp={asignarOperador}
             />
           ))}
+        </div>
+      )}
+
+      {/* ── MODAL NUEVA LÍNEA DESDE INVENTARIO ───────────────────────────── */}
+      {nuevaLinea && (
+        <div style={s.overlay} onClick={() => setNuevaLinea(false)}>
+          <div style={{ ...s.modal, maxWidth: 1100, width: "100%", maxHeight: "94vh", overflowY: "auto" as const, display: "flex", flexDirection: "column" as const, gap: 14 }} onClick={e => e.stopPropagation()}>
+
+            {/* Título */}
+            <div style={{ ...s.modalTitle, color: "#f97316", marginBottom: 0 }}>+ NUEVA LÍNEA DE REUBICACIÓN</div>
+
+            {/* Tipo de orden */}
+            <div>
+              <label style={s.fieldLabel}>TIPO DE ORDEN</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                {([
+                  { k: "PRODUCCION",            l: "Producción" },
+                  { k: "CONSOLIDACION_SALDOS",  l: "Consolidación de Saldos" },
+                  { k: "CONSOLIDACION_VOLUMEN", l: "Consolidación de Volumen" },
+                ] as { k: typeof nlTipoOrden; l: string }[]).map(t => (
+                  <button key={t.k} onClick={() => setNlTipoOrden(t.k)}
+                    style={{ fontSize: 11, fontWeight: 700, padding: "7px 14px", border: "1px solid", borderColor: nlTipoOrden === t.k ? "#f97316" : "rgba(249,115,22,0.25)", borderRadius: 3, background: nlTipoOrden === t.k ? "rgba(249,115,22,0.12)" : "transparent", color: nlTipoOrden === t.k ? "#f97316" : "#64748b", cursor: "pointer", fontFamily: "'Courier New', monospace", letterSpacing: 0.5 }}>
+                    {nlTipoOrden === t.k ? "● " : "○ "}{t.l}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Fila: Orden + Selectores zona/loc */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+              <div>
+                <label style={s.fieldLabel}>N° ORDEN (opcional)</label>
+                <input value={nlOrden} onChange={e => setNlOrden(e.target.value)}
+                  placeholder="OP-2024-001" style={s.nlInput} />
+              </div>
+              <div>
+                <label style={s.fieldLabel}>ZONA ORIGEN</label>
+                <select value={nlZona} onChange={e => onZonaChange(e.target.value)} style={{ ...s.nlInput, cursor: "pointer" }}>
+                  <option value="">— Selecciona zona —</option>
+                  {zonas.map(z => <option key={z} value={z}>{z}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={s.fieldLabel}>LOCALIZADOR ORIGEN</label>
+                <select value={nlLoc} onChange={e => onLocChange(e.target.value)} disabled={!nlZona} style={{ ...s.nlInput, cursor: nlZona ? "pointer" : "not-allowed", opacity: nlZona ? 1 : 0.5 }}>
+                  <option value="">— Selecciona loc —</option>
+                  {locsPorZona.map(l => <option key={l} value={l}>{l}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {/* Tabla de inventario */}
+            {nlLoc && (
+              <>
+                {/* Barra superior */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, background: "#f1f5f9", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 4, padding: "8px 14px", flexWrap: "wrap" as const }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <button
+                      onClick={() => {
+                        const allSel = selInv.size === invItems.length;
+                        setSelInv(allSel ? new Set() : new Set(invItems.map(i => i.id)));
+                      }}
+                      style={{ fontSize: 11, fontWeight: 700, padding: "5px 12px", border: "1px solid rgba(249,115,22,0.4)", borderRadius: 3, background: selInv.size === invItems.length ? "rgba(249,115,22,0.12)" : "transparent", color: "#f97316", cursor: "pointer", fontFamily: "'Courier New', monospace", letterSpacing: 1 }}>
+                      {selInv.size === invItems.length && invItems.length > 0 ? "☑ QUITAR TODAS" : "☐ AGREGAR TODAS"}
+                    </button>
+                    <span style={{ fontSize: 11, color: "#64748b", fontFamily: "monospace" }}>
+                      {selInv.size} de {invItems.length} seleccionadas
+                    </span>
+                  </div>
+                  <button onClick={sugerirDestinos} disabled={suggesting || selInv.size === 0}
+                    style={{ fontSize: 11, fontWeight: 700, padding: "5px 14px", border: "1px solid rgba(96,165,250,0.4)", borderRadius: 3, background: "rgba(96,165,250,0.08)", color: "#60a5fa", cursor: selInv.size > 0 ? "pointer" : "not-allowed", fontFamily: "'Courier New', monospace", opacity: selInv.size === 0 ? 0.5 : 1, letterSpacing: 0.5 }}>
+                    {suggesting ? "⟳ Calculando…" : "⚡ SUGERIR DESTINOS"}
+                  </button>
+                </div>
+
+                {/* Tabla */}
+                {loadingInv ? (
+                  <div style={{ textAlign: "center" as const, color: "#94a3b8", padding: 30, fontSize: 12 }}>Cargando inventario…</div>
+                ) : invItems.length === 0 ? (
+                  <div style={{ textAlign: "center" as const, color: "#94a3b8", padding: 30, fontSize: 12, border: "1px dashed rgba(249,115,22,0.15)", borderRadius: 4 }}>
+                    Sin stock en {nlLoc}
+                  </div>
+                ) : (
+                  <div style={{ overflowX: "auto" as const, border: "1px solid rgba(249,115,22,0.15)", borderRadius: 4 }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 11, fontFamily: "'Courier New', monospace" }}>
+                      <thead>
+                        <tr style={{ background: "#f8fafc", borderBottom: "1px solid rgba(249,115,22,0.15)" }}>
+                          <th style={s.th}></th>
+                          <th style={s.th}>COD. ORG INV</th>
+                          <th style={s.th}>CÓDIGO</th>
+                          <th style={{ ...s.th, textAlign: "left" as const, minWidth: 160 }}>DESCRIPCIÓN</th>
+                          <th style={s.th}>SUBINV. ORIGEN</th>
+                          <th style={s.th}>LOC. ORIGEN</th>
+                          <th style={s.th}>LOTE</th>
+                          <th style={s.th}>CAN. FÍSICA</th>
+                          <th style={s.th}>PALLETS</th>
+                          <th style={s.th}>CAJAS</th>
+                          <th style={{ ...s.th, minWidth: 100 }}>SUBINV. DESTINO</th>
+                          <th style={{ ...s.th, minWidth: 130 }}>LOC. DESTINO</th>
+                          <th style={{ ...s.th, minWidth: 100 }}>RESPONSABLE</th>
+                          <th style={s.th}>INV-PE</th>
+                          <th style={s.th}>CONTEO</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {invItems.map((item, idx) => {
+                          const sel = selInv.has(item.id);
+                          const dest = rowDest.get(item.id) ?? { loc: "", subinv: "ALMACEN", responsable: "", inv_pe: "", conteo: "" };
+                          return (
+                            <tr key={item.id}
+                              style={{ background: sel ? "rgba(249,115,22,0.05)" : idx % 2 === 0 ? "#fff" : "#fafafa", borderBottom: "1px solid rgba(0,0,0,0.05)" }}>
+                              <td style={{ ...s.td, width: 28 }} onClick={() => setSelInv(p => { const n = new Set(p); sel ? n.delete(item.id) : n.add(item.id); return n; })}>
+                                <input type="checkbox" checked={sel} readOnly style={{ accentColor: "#f97316", cursor: "pointer" }} />
+                              </td>
+                              <td style={{ ...s.td, color: "#6366f1" }}>{item.cod_org_inv || "—"}</td>
+                              <td style={{ ...s.td, color: "#f97316", fontWeight: 700 }}>{item.codigo || "—"}</td>
+                              <td style={{ ...s.td, textAlign: "left" as const, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{item.descripcion || "—"}</td>
+                              <td style={{ ...s.td, color: "#64748b" }}>{item.subinventario || "—"}</td>
+                              <td style={{ ...s.td, color: "#94a3b8" }}>{item.localizador || "—"}</td>
+                              <td style={{ ...s.td, color: "#6366f1" }}>{item.lote || "—"}</td>
+                              <td style={s.td}>{item.cantidad_fisica ?? "—"}</td>
+                              <td style={{ ...s.td, color: "#fbbf24", fontWeight: 700 }}>{item.pallets ?? 0}</td>
+                              <td style={s.td}>{item.cajas ?? 0}</td>
+                              {/* Destino editable */}
+                              <td style={{ padding: "3px 4px" }} onClick={e => e.stopPropagation()}>
+                                <select value={dest.subinv} onChange={e => updateRowDest(item.id, "subinv", e.target.value)}
+                                  style={{ ...s.nlInput, fontSize: 10, padding: "3px 5px", width: "100%" }}>
+                                  {["ALMACEN", "PRODUCCION", "DESPACHO"].map(v => <option key={v}>{v}</option>)}
+                                </select>
+                              </td>
+                              <td style={{ padding: "3px 4px" }} onClick={e => e.stopPropagation()}>
+                                <input value={dest.loc} onChange={e => updateRowDest(item.id, "loc", e.target.value)}
+                                  placeholder="ZONA.00.00.00"
+                                  style={{ ...s.nlInput, fontSize: 10, padding: "3px 6px", width: "100%", minWidth: 120, borderColor: dest.loc ? "rgba(74,222,128,0.4)" : "rgba(249,115,22,0.2)", color: dest.loc ? "#166534" : "#94a3b8" }} />
+                              </td>
+                              <td style={{ padding: "3px 4px" }} onClick={e => e.stopPropagation()}>
+                                <input value={dest.responsable} onChange={e => updateRowDest(item.id, "responsable", e.target.value)}
+                                  placeholder="—" style={{ ...s.nlInput, fontSize: 10, padding: "3px 6px", width: "100%", minWidth: 90 }} />
+                              </td>
+                              <td style={{ padding: "3px 4px" }} onClick={e => e.stopPropagation()}>
+                                <input type="number" value={dest.inv_pe} onChange={e => updateRowDest(item.id, "inv_pe", e.target.value)}
+                                  placeholder="0" style={{ ...s.nlInput, fontSize: 10, padding: "3px 6px", width: 55 }} />
+                              </td>
+                              <td style={{ ...s.td, color: "#64748b" }}>{item.conteo ?? "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      {selInv.size > 0 && (
+                        <tfoot>
+                          <tr style={{ background: "#f1f5f9", borderTop: "2px solid rgba(249,115,22,0.2)" }}>
+                            <td colSpan={7} style={{ ...s.td, textAlign: "right" as const, color: "#64748b", fontSize: 10, letterSpacing: 1 }}>TOTALES SELECCIÓN →</td>
+                            <td style={s.td}>{invItems.filter(i => selInv.has(i.id)).reduce((a, i) => a + (i.cantidad_fisica || 0), 0)}</td>
+                            <td style={{ ...s.td, color: "#fbbf24", fontWeight: 700 }}>{invItems.filter(i => selInv.has(i.id)).reduce((a, i) => a + (i.pallets || 0), 0)} plt</td>
+                            <td style={s.td}>{invItems.filter(i => selInv.has(i.id)).reduce((a, i) => a + (i.cajas || 0), 0)}</td>
+                            <td colSpan={5} style={{ ...s.td, color: "#60a5fa", textAlign: "left" as const }}>
+                              {(invItems.filter(i => selInv.has(i.id)).reduce((a, i) => a + (i.pallets || 0), 0) * 1.2).toFixed(2)} m²
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Botones */}
+            <div style={{ display: "flex", gap: 10, paddingTop: 4 }}>
+              <button
+                style={{ ...s.modalBtn, background: selInv.size > 0 ? "#c2410c" : "#374151", color: "#fff", flex: 1, opacity: (saving === "nueva" || selInv.size === 0) ? 0.6 : 1 }}
+                onClick={confirmarCrearDesdeInv} disabled={saving === "nueva" || selInv.size === 0}>
+                {saving === "nueva" ? "⟳ Creando…" : `CREAR ${selInv.size} LÍNEA${selInv.size !== 1 ? "S" : ""} [${nlTipoOrden.replace(/_/g, " ")}] →`}
+              </button>
+              <button style={s.modalBtnCancel} onClick={() => setNuevaLinea(false)}>Cancelar</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -325,29 +651,37 @@ export default function OrdenesProduccionPage() {
 
       {/* ── MODAL FRACCIONAR ──────────────────────────────────────────────── */}
       {fraccion && (() => {
-        const { original, p1, dest1, dest2 } = fraccion;
-        const ptotal   = original.pallets || 0;
-        const p2       = ptotal - p1;
-        const metTotal = original.metraje ?? Math.round(ptotal * 1.2 * 100) / 100;
-        const met1     = p1 > 0 ? Math.round((p1 / ptotal) * metTotal * 100) / 100 : 0;
-        const met2     = Math.round((metTotal - met1) * 100) / 100;
-        const valid    = p1 > 0 && p2 > 0 && dest1.trim() && dest2.trim();
+        const { original, p1, c1, dest1, dest2 } = fraccion;
+        const ptotal = original.pallets || 0;
+        const ctotal = original.cajas   || 0;
+        const p2 = ptotal - p1;
+        const c2 = ctotal - c1;
+        const met1 = Math.round(p1 * 1.2 * 100) / 100;
+        const met2 = Math.round(p2 * 1.2 * 100) / 100;
+        const palOk = p1 > 0 && p2 > 0;
+        const cajOk = c1 >= 0 && c2 >= 0;
+        const valid = palOk && cajOk && dest1.trim() && dest2.trim();
         return (
           <div style={s.overlay} onClick={() => setFraccion(null)}>
-            <div style={{ ...s.modal, maxWidth: 520 }} onClick={e => e.stopPropagation()}>
+            <div style={{ ...s.modal, maxWidth: 560 }} onClick={e => e.stopPropagation()}>
               <div style={{ ...s.modalTitle, color: "#f97316" }}>✂ FRACCIONAR LÍNEA</div>
+
+              {/* Info original */}
               <div style={s.fracOrigBox}>
                 <div style={{ fontSize: 10, letterSpacing: 2, color: "#94a3b8", marginBottom: 8 }}>LÍNEA ORIGINAL</div>
                 <div style={{ display: "flex", gap: 20, flexWrap: "wrap" as const }}>
                   <div><div style={s.fracLabel}>ORIGEN</div><div style={{ fontFamily: "monospace", fontWeight: 700, color: "#f97316", fontSize: 14 }}>{original.localizador_origen || "—"}</div></div>
                   {original.lote && <div><div style={s.fracLabel}>LOTE</div><div style={{ fontWeight: 600, fontSize: 13 }}>{original.lote}</div></div>}
                   <div><div style={s.fracLabel}>PALLETS</div><div style={{ fontWeight: 700, fontSize: 22, color: "#fbbf24" }}>{ptotal}</div></div>
-                  <div><div style={s.fracLabel}>METRAJE</div><div style={{ fontWeight: 700, fontSize: 22, color: "#60a5fa" }}>{metTotal} m²</div></div>
+                  <div><div style={s.fracLabel}>CAJAS</div><div style={{ fontWeight: 700, fontSize: 22, color: "#e2e8f0" }}>{ctotal}</div></div>
+                  <div><div style={s.fracLabel}>METRAJE</div><div style={{ fontWeight: 700, fontSize: 22, color: "#60a5fa" }}>{Math.round(ptotal * 1.2 * 100) / 100} m²</div></div>
                 </div>
               </div>
-              <div style={{ marginBottom: 16 }}>
+
+              {/* Slider pallets */}
+              <div style={{ marginBottom: 10 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 1.5, color: "#94a3b8", marginBottom: 6 }}>
-                  <span>FRACCIÓN 1</span><span>FRACCIÓN 2</span>
+                  <span>PALLETS FRACCIÓN 1</span><span>PALLETS FRACCIÓN 2</span>
                 </div>
                 <input type="range" min={1} max={ptotal - 1} value={p1}
                   onChange={e => setFraccion(f => f ? { ...f, p1: Number(e.target.value) } : f)}
@@ -357,14 +691,30 @@ export default function OrdenesProduccionPage() {
                   <span style={{ fontSize: 11, color: "#fbbf24" }}>{p2} plt</span>
                 </div>
               </div>
+
+              {/* Inputs de cajas */}
+              {ctotal > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, letterSpacing: 1.5, color: "#94a3b8", marginBottom: 6 }}>CAJAS FRACCIÓN 1 (resto va a F2)</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <input type="number" min={0} max={ctotal} value={c1}
+                      onChange={e => setFraccion(f => f ? { ...f, c1: Math.min(ctotal, Math.max(0, Number(e.target.value))) } : f)}
+                      style={{ ...s.fracInput, width: 80 }} />
+                    <span style={{ fontSize: 11, color: "#94a3b8" }}>F2 recibirá: <strong style={{ color: c2 >= 0 ? "#4ade80" : "#f87171" }}>{c2} cajas</strong></span>
+                  </div>
+                </div>
+              )}
+
+              {/* Cards F1 / F2 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                 {[
-                  { title: "FRACCIÓN 1", plt: p1, met: met1, val: dest1, key: "dest1" as const },
-                  { title: "FRACCIÓN 2", plt: p2, met: met2, val: dest2, key: "dest2" as const },
+                  { title: "FRACCIÓN 1", plt: p1, cj: c1, met: met1, val: dest1, key: "dest1" as const },
+                  { title: "FRACCIÓN 2", plt: p2, cj: c2, met: met2, val: dest2, key: "dest2" as const },
                 ].map(f => (
                   <div key={f.title} style={s.fracBox}>
                     <div style={s.fracBoxTitle}>{f.title}</div>
                     <div style={s.fracStat}><span style={s.fracStatLbl}>Pallets</span><strong style={{ color: "#fbbf24" }}>{f.plt}</strong></div>
+                    <div style={s.fracStat}><span style={s.fracStatLbl}>Cajas</span><strong style={{ color: "#e2e8f0" }}>{f.cj}</strong></div>
                     <div style={s.fracStat}><span style={s.fracStatLbl}>Metraje</span><strong style={{ color: "#60a5fa" }}>{f.met} m²</strong></div>
                     <label style={{ ...s.fracLabel, display: "block", marginTop: 10 }}>DESTINO *</label>
                     <input value={f.val}
@@ -373,11 +723,16 @@ export default function OrdenesProduccionPage() {
                   </div>
                 ))}
               </div>
-              <div style={{ ...s.fracSumBox, borderColor: valid ? "rgba(74,222,128,0.3)" : "rgba(248,113,113,0.3)", background: valid ? "rgba(74,222,128,0.06)" : "rgba(248,113,113,0.06)" }}>
-                <span style={{ color: (p1 + p2 === ptotal) ? "#4ade80" : "#f87171", fontWeight: 700 }}>
-                  {p1 + p2 === ptotal ? `✓ ${p1}+${p2}=${ptotal} plt · ${met1}+${met2}=${metTotal} m²` : `⚠ ${p1}+${p2} ≠ ${ptotal}`}
+
+              {/* Resumen */}
+              <div style={{ ...s.fracSumBox, marginTop: 14, borderColor: valid ? "rgba(74,222,128,0.3)" : "rgba(248,113,113,0.3)", background: valid ? "rgba(74,222,128,0.06)" : "rgba(248,113,113,0.06)" }}>
+                <span style={{ color: palOk && cajOk ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                  {!palOk ? `⚠ Pallets: ${p1}+${p2} ≠ ${ptotal}` :
+                   !cajOk ? `⚠ Cajas: ${c1}+${c2} ≠ ${ctotal}` :
+                   `✓ ${p1}+${p2}=${ptotal} plt · ${c1}+${c2}=${ctotal} cj · ${met1}+${met2}=${Math.round((met1+met2)*100)/100} m²`}
                 </span>
               </div>
+
               <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
                 <button style={{ ...s.modalBtn, background: valid ? "#c2410c" : "#374151", color: "#fff", opacity: (!valid || saving === "bulk") ? 0.6 : 1, flex: 1 }}
                   onClick={confirmarFraccion} disabled={!valid || saving === "bulk"}>
@@ -630,6 +985,11 @@ const s: { [k: string]: React.CSSProperties } = {
   textarea:        { width: "100%", background: "#f1f5f9", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#1e293b", fontSize: 12, padding: "10px", fontFamily: "'Courier New', monospace", outline: "none", resize: "vertical" as const, boxSizing: "border-box" as const },
   modalBtn:        { border: "none", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, padding: "10px 16px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
   modalBtnCancel:  { background: "transparent", border: "1px solid rgba(249,115,22,0.2)", color: "#6b7280", fontSize: 10, letterSpacing: 1, padding: "10px 14px", cursor: "pointer", borderRadius: 2, fontFamily: "'Courier New', monospace" },
+
+  /* Nueva línea */
+  nlInput: { width: "100%", background: "#f1f5f9", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 2, color: "#1e293b", fontSize: 12, padding: "7px 10px", fontFamily: "'Courier New', monospace", outline: "none", boxSizing: "border-box" as const },
+  th: { fontSize: 9, letterSpacing: 1.5, color: "#94a3b8", fontWeight: 700, padding: "6px 8px", textAlign: "center" as const, whiteSpace: "nowrap" as const, borderRight: "1px solid rgba(0,0,0,0.06)" },
+  td: { fontSize: 11, padding: "6px 8px", textAlign: "center" as const, borderRight: "1px solid rgba(0,0,0,0.04)" },
 
   /* Fracción */
   fracOrigBox:  { background: "#f1f5f9", border: "1px solid rgba(249,115,22,0.15)", borderRadius: 4, padding: "12px 16px", marginBottom: 16 },
